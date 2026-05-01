@@ -38,6 +38,14 @@ const IS_DEV = process.env.NODE_ENV === "development";
 const PYTHON_PORT = 5001;
 const VITE_DEV_SERVER_URL = "http://localhost:5173";
 
+// Optional brand icon. If the asset is missing we silently fall back
+// to Electron's default icon and skip the system tray (acceptable per
+// sprint/decision-tree.md §8 — tray is a Day-1 nice-to-have).
+// __dirname after compile is dist-electron/electron/, so we walk up
+// two levels to reach the repo root before descending into src/.
+const ICON_PATH = path.join(__dirname, "..", "..", "src", "imports", "image.png");
+const HAS_ICON = fs.existsSync(ICON_PATH);
+
 // ─────────────────────────────────────────────
 //  Persistent store (electron-store)
 // ─────────────────────────────────────────────
@@ -122,7 +130,7 @@ function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
     },
-    icon: path.join(__dirname, "..", "src", "imports", "image.png"),
+    ...(HAS_ICON ? { icon: ICON_PATH } : {}),
   });
 
   // Load the app
@@ -154,9 +162,15 @@ function createMainWindow(): BrowserWindow {
 // ─────────────────────────────────────────────
 //  System tray
 // ─────────────────────────────────────────────
-function createTray(): Tray {
-  const iconPath = path.join(__dirname, "..", "src", "imports", "image.png");
-  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+function createTray(): Tray | null {
+  if (!HAS_ICON) {
+    console.warn(
+      `[main] Tray icon not found at ${ICON_PATH} — skipping tray creation. ` +
+      `Add a 16x16 PNG to enable the tray (see sprint/daily-checklist.md Day 4).`
+    );
+    return null;
+  }
+  const icon = nativeImage.createFromPath(ICON_PATH).resize({ width: 16, height: 16 });
   const t = new Tray(icon);
 
   const menu = Menu.buildFromTemplate([
@@ -280,7 +294,7 @@ function registerIpcHandlers(): void {
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
   registerIpcHandlers();
-  startPythonService();
+  // startPythonService();  // Re-enabled on Day 3 of the demo sprint
   mainWindow = createMainWindow();
   tray = createTray();
 
