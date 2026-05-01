@@ -1,0 +1,357 @@
+import { useState, useEffect } from "react";
+import { AlertTriangle, Users, Activity, MoreHorizontal, RefreshCw, X } from "lucide-react";
+
+const MONO = "'Space Mono', monospace";
+const GROTESK = "'Space Grotesk', sans-serif";
+
+const COMLABS = [
+  { id: "08", label: "COMLAB 08", incident: 1, health: "CYBERSECURITY" },
+  { id: "09", label: "COMLAB 09", incident: 0, health: "HEALTHY" },
+  { id: "10", label: "COMLAB 10", incident: 0, health: "HEALTHY" },
+  { id: "11", label: "COMLAB 11", incident: 0, health: "HEALTHY" },
+];
+
+type PCStatus = "active" | "idle" | "alert" | "offline";
+
+const PC_STATUS_STYLE: Record<PCStatus, { bg: string; border: string; text: string }> = {
+  active: { bg: "#162a50", border: "#3a6fff", text: "#7eb5f5" },
+  idle: { bg: "#111d30", border: "#1e2e48", text: "#4a6080" },
+  alert: { bg: "#3a1020", border: "#e05c6a", text: "#e05c6a" },
+  offline: { bg: "#0d1320", border: "#1a2235", text: "#2a3a55" },
+};
+
+function generatePCs(count: number, alertIdx = -1): { id: string; status: PCStatus }[] {
+  return Array.from({ length: count }, (_, i) => {
+    let status: PCStatus = "idle";
+    if (i === alertIdx) status = "alert";
+    else if (i < 18) {
+      const r = Math.random();
+      status = r < 0.6 ? "active" : r < 0.85 ? "idle" : "offline";
+    } else {
+      status = Math.random() < 0.3 ? "active" : "idle";
+    }
+    return { id: `PC-${String(i + 1).padStart(2, "0")}`, status };
+  });
+}
+
+const attendance = [
+  { name: "John Doe", id: "2024-CS-001", pc: "PC-43", ip: "192.168.1.105", status: "ALERT", color: "#e05c6a" },
+  { name: "Jane Smith", id: "2024-CS-042", pc: "PC-03", ip: "192.168.1.100", status: "ONLINE", color: "#4ac77e" },
+  { name: "Alex Mercado", id: "2024-CS-019", pc: "PC-41", ip: "192.168.1.103", status: "ONLINE", color: "#4ac77e" },
+];
+
+const professors: Record<string, { name: string; subject: string; timeRange: string }> = {
+  "08": { name: "Prof. Andy Anciro", subject: "Cybersecurity", timeRange: "09:00 — 12:00" },
+  "09": { name: "Prof. Maria Santos", subject: "Application Dev", timeRange: "10:00 — 13:00" },
+  "10": { name: "Prof. Ramon Cruz", subject: "ICT Fundamentals", timeRange: "08:00 — 11:00" },
+  "11": { name: "Prof. Elena Reyes", subject: "Capstone Research", timeRange: "13:00 — 16:00" },
+};
+
+export function LabMonitoringPanel() {
+  const [activeTab, setActiveTab] = useState("08");
+  const [pcs] = useState(() => generatePCs(30, 0));
+  const [sessionSecs, setSessionSecs] = useState(96 * 60);
+  const [showAlert, setShowAlert] = useState(true);
+  const [expandedPC, setExpandedPC] = useState<string | null>("PC-01");
+
+  useEffect(() => {
+    const t = setInterval(() => setSessionSecs((s) => (s > 0 ? s - 1 : 0)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const mm = Math.floor(sessionSecs / 60);
+  const ss = sessionSecs % 60;
+  const sessionStr = `${String(Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
+
+  const prof = professors[activeTab];
+  const activeCount = pcs.filter((p) => p.status === "active").length;
+
+  return (
+    <div className="h-full overflow-y-auto" style={{ background: "#0d1320", fontFamily: GROTESK }}>
+      {/* Top bar */}
+      <div
+        className="flex items-center justify-between px-6 h-12 border-b border-[#1a2640] shrink-0"
+        style={{ background: "#0a1020" }}
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: MONO }}>SENTINEL MONITORING</span>
+          <div className="flex items-center gap-1.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-[#4ac77e]" />
+            <span className="text-[#4ac77e] tracking-widest" style={{ fontSize: "8px", fontFamily: MONO }}>SYSTEM SYNCHRONIZED</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button className="w-7 h-7 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5]">
+            <RefreshCw size={13} />
+          </button>
+          <span className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
+            {new Date().toLocaleTimeString("en-GB")} UTC
+          </span>
+        </div>
+      </div>
+
+      {/* COMLAB tabs */}
+      <div className="flex border-b border-[#1a2640]" style={{ background: "#0f1828" }}>
+        {COMLABS.map((lab) => (
+          <button
+            key={lab.id}
+            onClick={() => setActiveTab(lab.id)}
+            className="flex items-center gap-2 px-5 py-3 transition-all"
+            style={{
+              borderBottom: activeTab === lab.id ? "2px solid #3a6fff" : "2px solid transparent",
+              color: activeTab === lab.id ? "#7eb5f5" : "#4a6080",
+            }}
+          >
+            <span style={{ fontSize: "12px", fontFamily: MONO }}>{lab.label}</span>
+            {lab.incident > 0 && (
+              <span
+                className="px-1.5 py-0.5 rounded"
+                style={{ background: "#e05c6a20", color: "#e05c6a", fontSize: "8px", fontFamily: MONO }}
+              >
+                {lab.incident} INCIDENT
+              </span>
+            )}
+            {lab.incident === 0 && (
+              <span style={{ color: "#4ac77e", fontSize: "8px", fontFamily: MONO }}>
+                {lab.health}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      <div className="p-6 space-y-5">
+        {/* Session hero */}
+        <div
+          className="flex items-center justify-between px-6 py-4 rounded-xl border"
+          style={{ background: "#111d30", borderColor: "#1e2e48" }}
+        >
+          <div>
+            <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>
+              Currently Active Session · COMLAB {activeTab}
+            </p>
+            <p className="text-[#c5d5ea]" style={{ fontSize: "20px" }}>{prof.name}</p>
+            <p className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>
+              {prof.subject} &nbsp;·&nbsp; {prof.timeRange}
+            </p>
+          </div>
+          <div className="text-center">
+            <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>Session Time Left</p>
+            <p className="text-[#c5d5ea] tabular-nums" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>
+              {sessionStr}
+            </p>
+            <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>END OF LAB PERIOD</p>
+          </div>
+          <div className="text-center">
+            <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>Occupancy</p>
+            <p className="text-[#c5d5ea]" style={{ fontSize: "28px", fontFamily: MONO, lineHeight: 1 }}>
+              {activeCount}<span className="text-[#4a6080]" style={{ fontSize: "16px" }}>/{pcs.length}</span>
+            </p>
+          </div>
+          <div className="text-center">
+            <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>Alert Level</p>
+            <span
+              className="px-4 py-1.5 rounded"
+              style={{
+                background: activeTab === "08" ? "#e05c6a20" : "#4ac77e20",
+                color: activeTab === "08" ? "#e05c6a" : "#4ac77e",
+                fontSize: "13px",
+                fontFamily: MONO,
+                border: `1px solid ${activeTab === "08" ? "#e05c6a40" : "#4ac77e40"}`,
+              }}
+            >
+              {activeTab === "08" ? "ELEVATED" : "NORMAL"}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-5">
+          {/* Terminal Matrix */}
+          <div className="col-span-2 rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>Terminal Status Matrix</span>
+              <div className="flex items-center gap-3">
+                {(["active", "alert", "idle", "offline"] as PCStatus[]).map((s) => (
+                  <div key={s} className="flex items-center gap-1">
+                    <div
+                      className="w-2 h-2 rounded-sm"
+                      style={{ background: PC_STATUS_STYLE[s].bg, border: `1px solid ${PC_STATUS_STYLE[s].border}` }}
+                    />
+                    <span className="text-[#4a6080] capitalize" style={{ fontSize: "8px", fontFamily: MONO }}>{s}</span>
+                  </div>
+                ))}
+                <span className="text-[#2a3a55]" style={{ fontSize: "8px", fontFamily: MONO }}>
+                  Last Update: {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </div>
+            </div>
+            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(6, 1fr)" }}>
+              {pcs.map((pc) => {
+                const style = PC_STATUS_STYLE[pc.status];
+                const isExpanded = expandedPC === pc.id;
+                const shouldAutoExpand = pc.status === "alert";
+
+                return (
+                  <div
+                    key={pc.id}
+                    className="rounded-md p-2 flex flex-col items-center gap-1 cursor-pointer hover:brightness-110 transition-all"
+                    style={{
+                      background: style.bg,
+                      border: shouldAutoExpand ? `2px solid ${style.border}` : `1px solid ${style.border}`,
+                      boxShadow: shouldAutoExpand ? `0 0 12px ${style.border}50` : "none",
+                    }}
+                    onClick={() => setExpandedPC(isExpanded ? null : pc.id)}
+                  >
+                    <svg width="18" height="14" viewBox="0 0 24 18" fill="none">
+                      <rect x="0" y="0" width="24" height="14" rx="2" stroke={style.border} strokeWidth="1.5" fill={style.bg} />
+                      <line x1="12" y1="14" x2="12" y2="18" stroke={style.border} strokeWidth="1.5" />
+                      <line x1="8" y1="18" x2="16" y2="18" stroke={style.border} strokeWidth="1.5" />
+                      {pc.status === "active" && <circle cx="12" cy="7" r="3" fill={style.border} opacity="0.6" />}
+                      {pc.status === "alert" && <path d="M12 4 L14.5 9 H9.5 Z" fill={style.border} opacity="0.9" />}
+                    </svg>
+                    <span style={{ color: style.text, fontSize: "7px", fontFamily: MONO }}>{pc.id}</span>
+                    {pc.status !== "idle" && pc.status !== "offline" && (
+                      <span style={{ color: style.text, fontSize: "6px", fontFamily: MONO, textTransform: "uppercase" }}>
+                        {pc.status}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Expanded PC Alert Details */}
+            {expandedPC && pcs.find(p => p.id === expandedPC)?.status === "alert" && (
+              <div className="mt-4 p-4 rounded-lg border" style={{ background: "#1a0d1a", borderColor: "#e05c6a50" }}>
+                <div className="flex items-start gap-3">
+                  <AlertTriangle size={16} className="text-[#e05c6a] mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-[#e05c6a]" style={{ fontSize: "11px", fontFamily: MONO }}>
+                      HIGH ALERT: {expandedPC}
+                    </p>
+                    <p className="text-[#a07080] mt-1.5" style={{ fontSize: "10px" }}>
+                      Security engine detected unknown process "kill_linux_skills.exe" attempting to load a virtual drive.
+                      Process has been quarantined by Runa security engine.
+                    </p>
+                    <div className="flex items-center gap-3 mt-3">
+                      <div>
+                        <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>THREAT LEVEL</p>
+                        <p className="text-[#e05c6a]" style={{ fontSize: "10px", fontFamily: MONO }}>CRITICAL</p>
+                      </div>
+                      <div>
+                        <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>DETECTION TIME</p>
+                        <p className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>14:26:08</p>
+                      </div>
+                      <div>
+                        <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>STATUS</p>
+                        <p className="text-[#e8821a]" style={{ fontSize: "10px", fontFamily: MONO }}>QUARANTINED</p>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setExpandedPC(null); }}
+                    className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Live Attendance */}
+          <div className="rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Users size={13} className="text-[#3a6fff]" />
+                <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>Live Attendance</span>
+              </div>
+              <span
+                className="px-2 py-0.5 rounded"
+                style={{ background: "#1e3055", color: "#7eb5f5", fontSize: "9px", fontFamily: MONO }}
+              >
+                {activeCount} ACTIVE
+              </span>
+            </div>
+            <div className="space-y-3">
+              {attendance.map((a, i) => (
+                <div
+                  key={i}
+                  className="p-3 rounded-lg border"
+                  style={{ background: "#0d1320", borderColor: "#1e2e48" }}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>{a.name}</span>
+                    <span
+                      className="px-2 py-0.5 rounded"
+                      style={{ background: a.color + "20", color: a.color, fontSize: "8px", fontFamily: MONO }}
+                    >
+                      {a.status}
+                    </span>
+                  </div>
+                  <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>{a.id}</p>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>{a.pc}</span>
+                    <span className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>{a.ip}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-center text-[#2a3a55] mt-3" style={{ fontSize: "9px", fontFamily: MONO }}>
+              VIEW FULL CLASS ({activeCount})
+            </p>
+          </div>
+        </div>
+
+        {/* System Flag Alert */}
+        {activeTab === "08" && showAlert && (
+          <div
+            className="rounded-xl p-5 border flex items-start gap-5"
+            style={{ background: "#1a0d1a", borderColor: "#e05c6a50" }}
+          >
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center shrink-0" style={{ background: "#e05c6a20" }}>
+              <AlertTriangle size={22} className="text-[#e05c6a]" />
+            </div>
+            <div className="flex-1">
+              <p className="text-[#e05c6a]" style={{ fontSize: "12px", fontFamily: MONO }}>SYSTEM FLAG: TERMINAL PC-01</p>
+              <p className="text-[#a07080] mt-1" style={{ fontSize: "11px" }}>
+                Security engine detected unknown process "kill_linux_skills.exe" attempting to load an virtual drive.
+                Process quarantined by Runa engine.
+              </p>
+              <div className="flex items-center gap-3 mt-3">
+                <button
+                  className="px-4 py-1.5 rounded text-white transition-colors hover:opacity-90"
+                  style={{ background: "#e05c6a", fontSize: "10px", fontFamily: MONO }}
+                >
+                  WIPE TERMINAL
+                </button>
+                <button
+                  className="px-4 py-1.5 rounded border transition-colors hover:bg-[#1e2e48]"
+                  style={{ borderColor: "#2a3a55", color: "#4a6080", fontSize: "10px", fontFamily: MONO }}
+                >
+                  IGNORE OVERRIDE
+                </button>
+                <div className="ml-auto flex items-center gap-4">
+                  <div>
+                    <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>NETWORK USE</p>
+                    <p className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>68.3 Kbps</p>
+                  </div>
+                  <div>
+                    <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>PACKET LOSS</p>
+                    <p className="text-[#e05c6a]" style={{ fontSize: "10px", fontFamily: MONO }}>8.43%</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowAlert(false)}
+              className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
