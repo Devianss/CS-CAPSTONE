@@ -60,26 +60,50 @@ git tag day-1-green
 
 ---
 
-## Day 2 — Auth + Session
+## Day 2 — Agentic Spine + Auth/Session
 
-**Exit criterion:** Closing and re-opening the app preserves the logged-in session (when "Persistent Session" is checked). Logout from dropdown OR tray returns to `/`.
+**Exit criterion:**
+1. Student logs in, opens Productivity Assistant, sends a message, receives a response with a LOW Risk Badge.
+2. Stage "Trigger HIGH action" button creates an Approvals Queue entry.
+3. Admin logs in, sees red badge on APPROVALS QUEUE sidebar, approves the entry, action executes.
+4. Closing and reopening the app preserves session AND pending queue entries.
 
-### Morning (≈ 3 h)
+> Cross-reference: `steps.md` §6.1–§6.8 for the agentic spine, §2 for auth. `agentic-architecture.md` §3–§5 for design.
+
+### Morning (≈ 4 h) — Agentic types + risk classifier + tool registry
+- [ ] Create `src/app/agentic/types.ts` per `steps.md` §6.1.
+- [ ] Create `src/app/agentic/riskClassifier.ts` per §6.2. Unit-test by hand: `classifyAction({type:'wipe_terminal',...})` → `'high'`; `classifyAction({type:'chat_response', confidence: 0.5})` → `'medium'`.
+- [ ] Create `src/app/agentic/toolRegistry.ts` per §6.3.
+- [ ] Create `src/app/agentic/approvalQueue.ts` (renderer wrapper) per §6.4.
+
+### Morning (≈ 2 h, parallel) — Auth/Session
 - [ ] Create `src/app/auth/demoUsers.ts` with the two demo accounts (`steps.md` §2.1).
 - [ ] Wire `LoginPage.tsx` `handleSignIn` to authenticate + call `electronAPI.session.set` (§2.2).
 - [ ] Add a `loginError` state + visible error message under the form.
 - [ ] Manual test: invalid creds → message; valid admin creds → `/dashboard`; valid student creds → `/student-dashboard`.
 
-### Midday (≈ 2 h)
-- [ ] Refactor `Root.tsx` into a `SessionGuard` (§2.3).
-- [ ] Manual test the four scenarios in §2.7 (login → reopen, logout → reopen).
+### Midday (≈ 3 h) — Approval queue (main side)
+- [ ] Add `agent:propose`, `agent:list-pending`, `agent:approve`, `agent:reject`, `agent:request-info` IPC handlers in `electron/main.ts` per §6.4.
+- [ ] Add `agent` namespace to `electron/preload.ts`.
+- [ ] Add typings to `src/types/electron.d.ts`.
+- [ ] Refactor `Root.tsx` into a `SessionGuard` (§2.3) — also subscribes to `electronAPI.on("navigate", ...)`.
 
-### Afternoon (≈ 3 h)
-- [ ] Wire admin Logout button (`Dashboard.tsx`) to `session.clear` (§2.4).
-- [ ] Wire student Logout button (`StudentDashboard.tsx`) to `session.clear`.
-- [ ] Add tray "Logout" menu item in `electron/main.ts` that clears the session and sends `navigate("/")` (§2.5).
-- [ ] Subscribe to `electronAPI.on("navigate", ...)` in `Root.tsx` so the tray nav works.
-- [ ] (Optional) Add a "Force expire session in 30 s" debug button for stage demo (§2.6).
+### Afternoon (≈ 4 h) — UI components
+- [ ] Build `<RiskBadge />` (§6.5) — used everywhere risk surfaces.
+- [ ] Build `<ProductivityAssistant />` (§6.6) — single component, `role` prop. Stub backend: switch on prompt keywords ("explain", "summarize", "delete" → refusal templated message).
+- [ ] Mount student-mode assistant on `StudentDashboard.tsx` (replace or sit beside the app icons grid).
+- [ ] Add **ASSISTANT** sidebar item to admin `Dashboard.tsx`. Mount admin-mode assistant.
+- [ ] Build `<ApprovalsQueue />` (§6.7). Add **APPROVALS QUEUE** sidebar item between AUDIT and SETTINGS, with red-badge count of pending entries.
+- [ ] Add stage **Trigger HIGH action** debug button (§6.8) under `NODE_ENV === 'development'` guard.
+- [ ] Wire admin/student logout buttons to `session.clear` (§2.4) + tray Logout menu (§2.5).
+
+### Late afternoon (≈ 1 h) — Smoke test
+- [ ] Login student → Assistant → "Explain Big-O notation" → response with LOW badge.
+- [ ] Type "Delete C:\\Windows\\System32" → refusal template, also LOW badge.
+- [ ] Logout, login admin → click stage **Trigger HIGH action** → Queue badge shows "1".
+- [ ] Open APPROVALS QUEUE → see request → click Approve → toast confirms execution.
+- [ ] Audit Trails shows `action_proposed`, `action_approved`, `action_executed` rows linked by approvalId.
+- [ ] Restart app → pending queue (if any) and session both persist.
 - [ ] Commit + tag `day-2-green`.
 
 ### Found-during-the-day notes
@@ -87,38 +111,60 @@ git tag day-1-green
 
 ---
 
-## Day 3 — Sidecar + Persistence
+## Day 3 — Real Wiring (Python sidecar live)
 
-**Exit criterion:** Picking a file from the OS file picker shows a result toast. The audit row for that scan appears in Audit Trails after refresh, and survives an app restart.
+**Exit criterion:**
+1. Picking a file from the OS file picker shows a real ClamAV (or stub) result toast and writes an audit row that survives restart.
+2. Sending a chat message to the assistant calls real `/ai-task` and the response is rendered.
+3. USB devices currently plugged appear in the new USB sub-panel.
+4. Audit Trails shows HITL columns populated for any approval from Day 2.
 
-### Morning (≈ 3 h)
+> Cross-reference: `steps.md` §3 (sidecar + persistence) and §6.9–§6.11 (real `/ai-task`, ClamAV→agent, USB enum).
+
+### Morning (≈ 2 h) — Sidecar boot
 - [ ] Re-enable `startPythonService()` in `electron/main.ts`.
-- [ ] Verify `python --version` runs in the same shell that runs `pnpm dev`. If not → swap to `py` or absolute path.
+- [ ] Verify `python --version` runs in the same shell that runs `npm run dev`. If not → swap to `py` or absolute path.
 - [ ] Install Python deps: `cd python-service && pip install flask boto3 python-clamd watchdog requests pyusb && cd ..`. (clamd / pyusb may fail to import — that's fine.)
-- [ ] Launch `pnpm dev` — Python service should print `[python] PCU Lab Portal service starting on port 5001` in the Electron terminal.
+- [ ] Launch `npm run dev` — Python service should print `[python] PCU Lab Portal service starting on port 5001` in the Electron terminal.
 - [ ] Hit `http://localhost:5001/health` from a browser → JSON response.
 
-### Midday (≈ 3 h)
-- [ ] Extend `python:call` IPC handler in `main.ts` to support GET (or add a separate `python:get` handler) — needed for `/health`.
+### Midday (≈ 3 h) — Health badge + real `/ai-task` + ClamAV
+- [ ] Extend `python:call` IPC handler in `main.ts` to support GET — needed for `/health` and `/usb-list`.
 - [ ] Build `<HealthDot />` and mount it in the admin TopBar (§3.3).
-- [ ] Confirm green dot within 10 s of launch.
+- [ ] Wire `<ProductivityAssistant />` to call real `/ai-task` with `{prompt, role, tools}` (§6.9). 5s timeout falls back to a labeled static response.
+- [ ] Extend `python-service/service.py` `/ai-task` to accept role + tools and build a Bedrock call if creds present, else canned response.
 - [ ] Add the **Run File Scan** action (§3.4):
   - [ ] Tile in `AccessControlPanel.tsx` next to "Lock Cluster".
   - [ ] Click → file picker → POST to `/scan-file` → toast.
+  - [ ] If threat detected, programmatically call `proposeAction({type:'quarantine_usb',...})` (§6.10) — produces the audit chain.
   - [ ] Tray notification fires too.
 
-### Afternoon (≈ 4 h)
+### Afternoon (≈ 3 h) — USB enumeration
+- [ ] Python: implement `GET /usb-list` returning currently-mounted removable devices (pyusb).
+- [ ] Renderer: add a small "USB Devices" sub-panel on `LabMonitoringPanel.tsx` polling `/usb-list` every 5s.
+- [ ] (Optional, time-permitting) Implement `POST /usb-quarantine` that unmounts + logs the device serial. Stub if pyusb permissions block.
+
+### Afternoon (≈ 3 h) — Persistence
 - [ ] Persistence — choose path (decision-tree §2):
   - **Path A — SQLite:**
     - [ ] Add `audit:log` and `audit:list` IPC handlers in `main.ts` (§3.5).
     - [ ] Extend `preload.ts` `audit` namespace + typings in `src/types/electron.d.ts`.
-  - **Path B — electron-store JSON:**
+  - **Path B — electron-store JSON (default):**
     - [ ] Replace `db.ts` calls with `electron-store`-backed equivalents (§3.5b).
     - [ ] Same IPC + typings extensions.
+- [ ] Extend audit row schema with HITL fields (`approvalId`, `approverUserId`, `riskTier`, `confidenceScore`) — additive (§6.16).
 - [ ] Call `audit.log("login", ...)` after successful login.
-- [ ] Call `audit.log("file_scan", ...)` after every scan.
-- [ ] Update `AuditTrailsPanel.tsx` to fetch `audit.list(100)` on mount and merge with seed rows (or replace seed rows entirely).
-- [ ] Smoke test §3.6.
+- [ ] Call `audit.log("file_scan", ...)` after every scan (with `riskTier` populated).
+- [ ] Update `AuditTrailsPanel.tsx` to fetch `audit.list(100)` and render the new HITL columns when populated.
+
+### Late afternoon (≈ 1 h) — Smoke test
+- [ ] Login admin → health dot green within 10s.
+- [ ] Run File Scan on a `.txt` → toast with sha256 + audit row.
+- [ ] Run File Scan on EICAR → threat detected + `action_proposed` queued.
+- [ ] Open Approvals Queue → approve → action_executed row appears.
+- [ ] Close + reopen app → all rows still there, queue still there.
+- [ ] Send "Summarize today's audit" to admin Assistant → real Bedrock (or labeled static) response.
+- [ ] USB sub-panel shows devices currently plugged in.
 - [ ] Commit + tag `day-3-green`.
 
 ### Found-during-the-day notes
@@ -126,33 +172,48 @@ git tag day-1-green
 
 ---
 
-## Day 4 — Integration + Polish
+## Day 4 — Canonical Demo Flow + Governance
 
-**Exit criterion:** Full demo script (`demo-script.md`) runs cleanly in dev mode without devtools open. Every demo button does its real action or a clearly labeled "demo stub" toast.
+**Exit criterion:** Canonical USB scenario from `agentic-architecture.md` §7 runs end-to-end without code edits. PLUS 7+/9 of the Definition-of-Done items in §13 pass.
 
-### Morning (≈ 3 h)
-- [ ] Replace random data in `LabDashboardPanel.tsx` with deterministic `STATIC_GRIDS` (§4.1).
-- [ ] Same for `LabMonitoringPanel.tsx` and `AccessControlPanel.tsx`.
-- [ ] Verify rehearsal-stable: refresh 3× and the same alert PCs appear in the same positions.
+> Cross-reference: `steps.md` §6.12–§6.16 (Action Timeline + scenario orchestrator + override-via-queue + governance + HITL audit), §4 (carry-over Tier 1 polish + scheduling).
 
-### Midday (≈ 3 h)
+### Morning (≈ 3 h) — Action Timeline + canonical scenario
+- [ ] Build `<ActionTimeline />` (`steps.md` §6.12). Renders three labeled stages with timestamps.
+- [ ] Add `AgenticEventBus` context in `src/app/agentic/eventBus.tsx` so the orchestrator can push events without prop-drilling.
+- [ ] Build `src/app/agentic/scenarios/usbInsertion.ts` orchestrator (§6.13).
+- [ ] Mount `<ActionTimeline />` on the student dashboard as a slide-up panel triggered by the first perception event.
+- [ ] Add stage **Simulate USB** button (admin-side, dev-only) that dispatches a fake `usb-inserted` event for fallback when hardware fails.
+
+### Midday (≈ 3 h) — Override actions through the queue
 - [ ] Add `policy:get` and `policy:set` IPC handlers + preload + typings.
-- [ ] Wire **Lock Cluster** confirm modal to call `policy.set` + `audit.log` (§4.2). On panel mount, hydrate `locked` state from `policy.get`.
-- [ ] Wire **Terminate All Sessions** to call `audit.log` + show toast (§4.3).
-- [ ] Wire **WIPE TERMINAL** alert button (§4.5).
-- [ ] Wire **Kiosk Mode** toggle in `SettingsPanel.tsx` (§4.4).
+- [ ] Refactor **Lock Cluster** confirm modal to call `proposeAction` (HIGH) instead of direct policy.set (§6.14). Action handler in main executes `policy.set` only on approval.
+- [ ] Same for **Terminate All Sessions**.
+- [ ] Same for **WIPE TERMINAL** alert button on `LabMonitoringPanel`.
+- [ ] **Kiosk Mode** toggle (Settings) — auto-execute MEDIUM with audit row (§6.14 footer).
 - [ ] Add `globalShortcut` `Ctrl+Shift+K` escape hatch in `main.ts`. **Test it.**
 
-### Afternoon (≈ 4 h)
-- [ ] Lift `useNotifications` into a Context provider in `App.tsx` so `pushToast` works from any panel (§4.7).
+### Afternoon (≈ 3 h) — Governance affordances + Tier 1 polish
+- [ ] Build `<ConsentBanner />` modal — shown on first launch when `electron-store` flag `consent_given` is missing. On accept: write `consent_given` audit row + set flag (§6.15.1).
+- [ ] Build `<GovernanceBanner />` footer — always-rendered slate strip in the layout shell (§6.15.2).
+- [ ] Add **Data Minimization** tooltip near Audit Trails Export (§6.15.3).
+- [ ] Add scope statement banner above Productivity Assistant chat input (§6.15.4).
+- [ ] Add **Privacy** sub-tab to `SettingsPanel.tsx` per §6.15.5.
+- [ ] Lift `useNotifications` into a Context provider in `App.tsx` (§4.7).
 - [ ] Add student session expiry hard-stop (§4.6).
-- [ ] **Full dry run #1** of `demo-script.md`. Time it. Note every snag below.
+- [ ] Replace random data in `LabDashboardPanel`, `LabMonitoringPanel`, `AccessControlPanel` with deterministic `STATIC_GRIDS` (§4.1).
+- [ ] Apply Tier 1 frontend fixes: `min-h-screen → h-full`, z-index, kebab handlers per `frontend-audit-decisions.md`.
+- [ ] (Folded in) COMLAB modular config + scheduling data model per `scheduling-architecture.md` if not already done.
+
+### Late afternoon (≈ 1 h) — Dry runs
+- [ ] **Full dry run #1** of `demo-script.md`, anchored on the canonical USB scenario. Time it. Note every snag below.
 - [ ] Fix top 3 snags.
-- [ ] **Full dry run #2.** Time it.
+- [ ] **Full dry run #2.** Time it. Target 8 min ± 1.
+- [ ] Walk through `agentic-architecture.md` §13 Definition-of-Done. Aim for 7+/9 passing.
 - [ ] Commit + tag `day-4-green`.
 
 ### Found during dry run
-- (e.g. "Audit trails table broke with empty seed list", "Health dot races on cold boot", …)
+- (e.g. "Action Timeline races on cold boot", "Bedrock latency too long without spinner", "Approval queue refresh lag", …)
 - ...
 
 ---
@@ -162,12 +223,14 @@ git tag day-1-green
 **Exit criterion:** Hand laptop to a stranger, they double-click `RUNA.exe` (or `run-demo.bat`), full demo script completes ≤ 10 min without an unrecovered crash.
 
 ### Morning (≈ 3 h)
-- [ ] (Optional) `pnpm build:win` to produce a portable `.exe`.
-  - [ ] If `better-sqlite3` rebuild fails: `pnpm rebuild:native && pnpm build:win`.
+- [ ] (Optional) `npm run build:win` to produce a portable `.exe`.
+  - [ ] If `better-sqlite3` rebuild fails: `npm run rebuild:native && npm run build:win`.
   - [ ] If still fails: skip — we go dev-mode launcher only.
 - [ ] Test the portable `.exe` on the actual demo laptop. Note antivirus warnings.
 - [ ] Author `run-demo.bat` (§5.2) as primary or backup launcher.
 - [ ] Author `README-DEMO.md` — one-page launch instructions for whoever runs the laptop.
+- [ ] (Stretch) Migrate audit log from electron-store JSON to SQLite (Path A). If risky, defer.
+- [ ] (Stretch) Add chained row-hash integrity column to audit rows.
 
 ### Midday (≈ 3 h)
 - [ ] **Rehearsal #1** — straight read of `demo-script.md`. Time it. Fix snags.

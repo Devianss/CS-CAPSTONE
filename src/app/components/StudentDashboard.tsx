@@ -119,7 +119,7 @@ export function StudentDashboard() {
           {/* Duration of Use */}
           <div className="text-right">
             <div className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Duration of Use
+              Elapsed Time
             </div>
             <div className="text-[#c5d5ea] tabular-nums" style={{ fontSize: "20px", fontFamily: MONO, lineHeight: 1.1 }}>
               {formatTime(secondsUsed)}

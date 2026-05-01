@@ -551,10 +551,332 @@ git tag demo-ready
 
 ---
 
+## §6 Agentic Spine — Tier 0 work (overlays Days 2–4)
+
+> **Reordered after reading the thesis rationale.** This section is additive to §2–§4 above. Where §2–§4 plan the original auth/sidecar/polish work, §6 plans the bounded-agentic spine that makes the demo defensible. Read `agentic-architecture.md` first.
+
+**Day 2 absorbs §6.1–§6.7 alongside the original §2 auth work.**
+**Day 3 absorbs §6.8–§6.11 alongside the original §3 sidecar work.**
+**Day 4 absorbs §6.12–§6.16 alongside the original §4 polish + the carried-over Tier 1 work.**
+
+### 6.1 Type definitions (`src/app/agentic/types.ts`)
+
+```ts
+export type RiskTier = 'low' | 'medium' | 'high';
+
+export type ActionType =
+  | 'chat_response' | 'audit_query' | 'view_policy' | 'health_check'
+  | 'recommend_action' | 'draft_policy' | 'mark_notification'
+  | 'wipe_terminal' | 'lock_cluster' | 'terminate_session'
+  | 'quarantine_usb' | 'force_logout' | 'enforce_blocklist';
+
+export type AgentRole = 'student' | 'admin';
+
+export interface AgentAction {
+  type: ActionType;
+  scope: 'self' | 'session' | 'lab' | 'system';
+  reversible: boolean;
+  payload: Record<string, unknown>;
+  confidence?: number; // 0..1, only for AI-driven
+  reasoning: string;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  createdAt: number;
+  requesterId: string;
+  requesterRole: AgentRole;
+  action: AgentAction;
+  riskTier: 'high';
+  evidence?: { scanResult?: unknown; aiConfidence?: number; sourceAlert?: string };
+  status: 'pending' | 'approved' | 'rejected' | 'info_requested';
+  decision?: { decidedAt: number; decidedByUserId: string; comment?: string };
+  comments?: Array<{ at: number; byUserId: string; text: string }>;
+}
+
+export interface ToolDefinition {
+  id: string;
+  label: string;
+  riskTier: RiskTier;
+  description: string;
+  systemPromptHint: string;
+}
+
+export interface AgentContext {
+  role: AgentRole;
+  userId: string;
+  availableTools: ToolDefinition[];
+  systemPrompt: string;
+}
+```
+
+### 6.2 Risk classifier (`src/app/agentic/riskClassifier.ts`)
+
+```ts
+import type { AgentAction, RiskTier, ActionType } from './types';
+
+const RISK_RULES: Record<ActionType, RiskTier> = {
+  chat_response: 'low',  audit_query: 'low',  view_policy: 'low',  health_check: 'low',
+  recommend_action: 'medium',  draft_policy: 'medium',  mark_notification: 'medium',
+  wipe_terminal: 'high',  lock_cluster: 'high',  terminate_session: 'high',
+  quarantine_usb: 'high',  force_logout: 'high',  enforce_blocklist: 'high',
+};
+
+export function classifyAction(action: AgentAction): RiskTier {
+  const baseTier = RISK_RULES[action.type] ?? 'high'; // unknown = HIGH (fail-safe)
+  if (action.confidence !== undefined && action.confidence < 0.7) {
+    return escalateOneTier(baseTier);
+  }
+  return baseTier;
+}
+
+function escalateOneTier(t: RiskTier): RiskTier {
+  return t === 'low' ? 'medium' : 'high';
+}
+
+export const RISK_RULES_TABLE = RISK_RULES; // exported for the panelist-facing UI tooltip
+```
+
+### 6.3 Tool registry (`src/app/agentic/toolRegistry.ts`)
+
+```ts
+import type { ToolDefinition, AgentRole, AgentContext } from './types';
+
+const STUDENT_TOOLS: ToolDefinition[] = [
+  { id: 'summarize_text',  label: 'Summarize text',     riskTier: 'low', description: 'Summarize a passage you paste in.', systemPromptHint: 'Provide a 3-sentence summary preserving key claims.' },
+  { id: 'explain_concept', label: 'Explain a concept',  riskTier: 'low', description: 'Explain an academic concept.',       systemPromptHint: 'Explain plainly with an example.' },
+  { id: 'code_review',     label: 'Review code',        riskTier: 'low', description: 'Comment on pasted code.',            systemPromptHint: 'Focus on correctness and readability.' },
+  { id: 'generate_outline',label: 'Generate outline',   riskTier: 'low', description: 'Outline an essay or paper.',         systemPromptHint: 'Produce a 3-level outline.' },
+  { id: 'explain_error',   label: 'Explain an error',   riskTier: 'low', description: 'Explain a pasted error message.',    systemPromptHint: 'Identify the cause and suggest a fix.' },
+];
+
+const ADMIN_TOOLS: ToolDefinition[] = [
+  { id: 'summarize_audit',     label: 'Summarize audit log',     riskTier: 'low',    description: 'Summarize today\'s audit log.',     systemPromptHint: 'Highlight unusual events.' },
+  { id: 'explain_alert',       label: 'Explain a security alert',riskTier: 'low',    description: 'Explain a specific alert.',         systemPromptHint: 'Explain in plain terms.' },
+  { id: 'recommend_response',  label: 'Recommend a response',    riskTier: 'medium', description: 'Recommend response to an alert.',  systemPromptHint: 'Provide 2–3 ranked options.' },
+  { id: 'draft_policy',        label: 'Draft policy update',     riskTier: 'medium', description: 'Draft a website blocklist update.',systemPromptHint: 'Provide a specific draft entry.' },
+  { id: 'propose_action',      label: 'Propose action (HITL)',   riskTier: 'high',   description: 'Queue a state-mutating action.',   systemPromptHint: 'Describe the proposed action and rationale.' },
+];
+
+const STUDENT_PROMPT = `You are a bounded academic assistant for a CS student. You may only respond to messages sent in this chat. You may not read files, access the network, or modify any system state. If asked to do anything beyond academic explanation, refuse and suggest the student contact lab staff.`;
+
+const ADMIN_PROMPT = `You are a bounded operational assistant for a laboratory administrator. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. All HIGH-risk actions you propose must be approved in the Approvals Queue, including by the same admin you are speaking to.`;
+
+export function getAgentContext(role: AgentRole, userId: string): AgentContext {
+  return {
+    role, userId,
+    availableTools: role === 'student' ? STUDENT_TOOLS : ADMIN_TOOLS,
+    systemPrompt: role === 'student' ? STUDENT_PROMPT : ADMIN_PROMPT,
+  };
+}
+```
+
+### 6.4 Approval queue (`src/app/agentic/approvalQueue.ts`)
+
+In-memory cache + persisted to `electron-store` under key `approvals_queue`. Wraps the IPC surface from the renderer's perspective.
+
+```ts
+import type { ApprovalRequest, AgentAction } from './types';
+
+const electronAPI = (window as any).electronAPI;
+
+export async function proposeAction(action: AgentAction, requesterId: string, requesterRole: 'student' | 'admin'): Promise<ApprovalRequest> {
+  return await electronAPI.agent.propose({ action, requesterId, requesterRole });
+}
+
+export async function listPending(): Promise<ApprovalRequest[]> {
+  return await electronAPI.agent.listPending();
+}
+
+export async function approveRequest(id: string, approverUserId: string, comment?: string): Promise<ApprovalRequest> {
+  return await electronAPI.agent.approve({ id, approverUserId, comment });
+}
+
+export async function rejectRequest(id: string, approverUserId: string, comment?: string): Promise<ApprovalRequest> {
+  return await electronAPI.agent.reject({ id, approverUserId, comment });
+}
+
+export async function requestInfo(id: string, byUserId: string, text: string): Promise<ApprovalRequest> {
+  return await electronAPI.agent.requestInfo({ id, byUserId, text });
+}
+```
+
+Main-process side (`electron/main.ts`):
+
+```ts
+const APPROVAL_KEY = 'approvals_queue';
+function getQueue(): ApprovalRequest[] { return store.get(APPROVAL_KEY, []) as ApprovalRequest[]; }
+function setQueue(q: ApprovalRequest[]) { store.set(APPROVAL_KEY, q); }
+
+ipcMain.handle('agent:propose', async (_e, args: { action: AgentAction; requesterId: string; requesterRole: 'student' | 'admin' }) => {
+  // Risk-classify on the main side as well as renderer (defense in depth)
+  const tier = classifyAction(args.action);
+  if (tier !== 'high') {
+    // LOW/MEDIUM auto-execute path — caller handles, queue not used
+    return { autoExecuted: true, tier };
+  }
+  const req: ApprovalRequest = {
+    id: crypto.randomUUID(), createdAt: Date.now(),
+    requesterId: args.requesterId, requesterRole: args.requesterRole,
+    action: args.action, riskTier: 'high', status: 'pending',
+  };
+  setQueue([req, ...getQueue()]);
+  await logEvent('action_proposed', JSON.stringify({ approvalId: req.id, action: args.action }), args.requesterId, { riskTier: 'high', approvalId: req.id });
+  return req;
+});
+
+ipcMain.handle('agent:list-pending', () => getQueue().filter(r => r.status === 'pending'));
+
+ipcMain.handle('agent:approve', async (_e, args: { id: string; approverUserId: string; comment?: string }) => {
+  const q = getQueue();
+  const req = q.find(r => r.id === args.id);
+  if (!req || req.status !== 'pending') throw new Error('Not pending');
+  req.status = 'approved';
+  req.decision = { decidedAt: Date.now(), decidedByUserId: args.approverUserId, comment: args.comment };
+  setQueue(q);
+  await logEvent('action_approved', JSON.stringify({ approvalId: req.id }), args.approverUserId, { riskTier: 'high', approvalId: req.id, approverUserId: args.approverUserId });
+  // Execute: dispatch by action.type
+  await executeAction(req.action, req.requesterId, args.approverUserId, req.id);
+  await logEvent('action_executed', JSON.stringify({ approvalId: req.id, action: req.action }), 'system', { riskTier: 'high', approvalId: req.id, approverUserId: args.approverUserId });
+  return req;
+});
+// agent:reject, agent:request-info similarly
+```
+
+Add the `agent` namespace to `electron/preload.ts` and `src/types/electron.d.ts`.
+
+### 6.5 RiskBadge component (`src/app/components/agentic/RiskBadge.tsx`)
+
+Tiny component. ~30 lines. Renders a chip with the tier name + tooltip describing the rule that classified it.
+
+### 6.6 Productivity Assistant (`src/app/components/agentic/ProductivityAssistant.tsx`)
+
+Single component with a `role` prop. On mount calls `getAgentContext(role, userId)`. Renders:
+- Scope statement banner (top): list of available tools, system-prompt hint.
+- Chat history (middle): each message has a RiskBadge.
+- Input box (bottom): textarea + send button.
+
+On send:
+1. Write `chat_request` audit row.
+2. Call `electronAPI.python.call('/ai-task', { prompt, role, tools })` — Day 2 stub returns canned responses based on keyword match.
+3. Risk-classify the response (default `chat_response` LOW; if a tool was invoked, use that tool's risk tier).
+4. If tier is HIGH: call `proposeAction(...)` instead of rendering directly. Render a placeholder bubble: "Action queued for admin approval" and update via subscription when approved.
+5. Write `chat_response` (or `tool_invoked` / `action_proposed` / `request_refused`) audit row.
+
+Mount on the student dashboard (replaces or sits beside the existing app icons grid). Add an **ASSISTANT** sidebar item on the admin Dashboard that mounts the same component with `role="admin"`.
+
+### 6.7 Approvals Queue panel (`src/app/components/agentic/ApprovalsQueue.tsx`)
+
+New admin sidebar item between AUDIT and SETTINGS. Reads from `listPending()` on mount + on a 5s poll (or via IPC subscription). Renders each request as a card per `demo-script.md` Segment 4. Approve/Reject buttons call `approveRequest`/`rejectRequest`.
+
+The sidebar item shows a red badge with the count of pending entries — drives presenter attention during demo.
+
+### 6.8 Stage button: "Trigger HIGH action" (Day 2 only — removed by Day 4)
+
+Add a debug button somewhere on the admin Dashboard (TopBar overflow menu, behind a `NODE_ENV === 'development'` guard) that calls:
+
+```ts
+proposeAction({
+  type: 'wipe_terminal',
+  scope: 'session',
+  reversible: false,
+  payload: { pcId: 'C08-PC01' },
+  confidence: 1.0,
+  reasoning: 'Stage trigger — manual admin override request.',
+}, 'admin@runa.edu.ph', 'admin');
+```
+
+Use this to verify the queue works on Day 2 without needing the full USB pipeline.
+
+---
+
+### 6.9 Real `/ai-task` wiring (Day 3)
+
+Extend the Python service's `/ai-task` to accept `{ prompt, role, tools }`. If Bedrock creds present, build a Claude system message with the role-specific system prompt + tool whitelist. Else return a canned response keyed by the prompt's first verb.
+
+Renderer-side: replace the canned responses in `ProductivityAssistant` with real `electronAPI.python.call('/ai-task', ...)` calls. 5-second timeout — on timeout, render a labeled fallback message.
+
+### 6.10 Real ClamAV `/scan-file` integration with the agent
+
+Already planned in §3.4. Day 3 modification: after a successful scan with a detected threat, trigger the canonical agentic flow programmatically:
+
+```ts
+const action: AgentAction = {
+  type: 'quarantine_usb', // or 'wipe_file' for files
+  scope: 'session',
+  reversible: false,
+  payload: { path: scanPath, sha256: result.sha256, threat: result.threat },
+  confidence: 0.95, // ClamAV signature matches are high-confidence
+  reasoning: `ClamAV detected ${result.threat} (rule R12: threat detected + irreversible)`,
+};
+await proposeAction(action, currentUserId, currentRole);
+```
+
+This is what produces the audit chain `action_proposed → action_approved → action_executed`.
+
+### 6.11 USB enumeration `/usb-list` (Day 3)
+
+Python service exposes `GET /usb-list` returning currently-mounted removable devices. Renderer mounts a small "USB Devices" sub-panel on `LabMonitoringPanel`. On Day 4 the canonical scenario hooks USB events into the agentic flow.
+
+---
+
+### 6.12 Action Timeline component (Day 4)
+
+`src/app/components/agentic/ActionTimeline.tsx` — renders a horizontal three-stage timeline:
+
+```
+▸ Perception   ✓ 21:34:05  USB inserted (SanDisk 16GB)
+▸ Reasoning    ✓ 21:34:07  ClamAV detected Eicar-Test-Signature
+▸ Action       ⏳ 21:34:09  HIGH → escalated to admin queue
+```
+
+Receives events via a context (`AgenticEventBus`) populated by the orchestrator. Each stage transitions through pending → active (spinner) → complete. Mount on the student dashboard as a slide-up panel triggered by the first perception event.
+
+### 6.13 Canonical scenario orchestrator (`src/app/agentic/scenarios/usbInsertion.ts`)
+
+Coordinates the full USB → quarantine flow:
+
+1. Subscribe to `electronAPI.on('usb-inserted', ...)` (real pyusb event OR stage button dispatch).
+2. Push perception event to `AgenticEventBus`.
+3. Call `electronAPI.python.call('/scan-file', { path: usbMountPoint })`.
+4. Push reasoning event with progress, then result.
+5. Build the AgentAction, call `proposeAction(...)`.
+6. Push action event with "escalated to queue" status.
+7. Subscribe to approval state changes; on approve, push final "executed" stage and show toast.
+
+### 6.14 Wire admin override actions through the queue (Day 4)
+
+The original §4.2–§4.5 work for Lock Cluster / Terminate / WIPE TERMINAL changes shape: instead of directly calling `policy.set` + `audit.log`, those buttons now call `proposeAction` with the appropriate `AgentAction`. Since these are HIGH actions, they go through the queue. The same admin who clicked the button has to approve in the queue — narrate this as the two-party pattern.
+
+Kiosk Mode toggle is MEDIUM (reversible, single-machine), so it auto-executes with an audit row, no queue entry.
+
+### 6.15 Governance affordances (Day 4)
+
+Five small UI elements per `agentic-architecture.md` §8:
+
+1. **Consent banner.** Modal on first launch, dismissed via `electron-store` flag `consent_given`. On accept, call `electronAPI.audit.log('consent_given', userId, userId)`.
+2. **Governance footer.** Slate strip in the layout shell — `<GovernanceBanner />` component, always rendered.
+3. **Audit Trails Data Minimization tooltip.** Add an `<InfoTooltip>` next to the Export button.
+4. **Productivity Assistant scope statement.** Banner above chat input listing `availableTools.map(t => t.label)`.
+5. **Settings → Privacy panel.** New tab in `SettingsPanel` listing the seven items from §8.
+
+### 6.16 HITL audit row schema extensions (Day 4)
+
+Extend the audit row interface in `electron/db.ts` (or the electron-store equivalent) with the optional fields per `agentic-architecture.md` §6. All new fields are optional so existing rows don't need migration. Update `AuditTrailsPanel` to render the new columns when populated.
+
+---
+
+## §7 Definition of Done — Tier 0
+
+When all 9 items in `agentic-architecture.md` §13 pass, the agentic spine is shipped. Re-read that section before tagging `day-4-green`.
+
+---
+
 ## Cross-cutting tips
 
-- **Always run `pnpm build:electron` after editing `electron/*.ts`** — the dev script does it for you on launch, but if you only edit while the app is running, you must restart Electron.
+- **Always run `npm run build:electron` after editing `electron/*.ts`** — the dev script does it for you on launch, but if you only edit while the app is running, you must restart Electron.
 - **Renderer hot-reload still works** for files under `src/`. Editing `electron/*` requires Electron restart.
 - **DevTools console** is your friend for IPC errors. Open Network tab to see `python:call` errors.
 - **Keep the Python service terminal visible** during dev — it logs every request.
 - **Whenever in doubt, branch to `decision-tree.md`.** It tells you which fallback to take and how to recover.
+- **`agentic-architecture.md` is the source of truth** for risk tiers, tool whitelists, and HITL behavior. If §6 above contradicts it, the architecture doc wins — fix this file.
