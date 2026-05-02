@@ -10,7 +10,7 @@ import {
 } from "electron";
 import path from "path";
 import { spawn, ChildProcess } from "child_process";
-import electronStore from "electron-store";
+const Store = require("electron-store");
 import fs from "fs";
 
 // ─────────────────────────────────────────────
@@ -41,7 +41,7 @@ const VITE_DEV_SERVER_URL = "http://localhost:5173";
 // ─────────────────────────────────────────────
 //  Persistent store (electron-store)
 // ─────────────────────────────────────────────
-const store = new electronStore<StoreSchema>({
+const store = new Store({
   defaults: {
     session: null,
     settings: {
