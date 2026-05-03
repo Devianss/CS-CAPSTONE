@@ -50,7 +50,7 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 - AWS Cognito auth (sessions are local).
 - Real Bedrock evaluation rigor (a single canned response per tool is acceptable as long as it's labeled).
 - ClamAV install on the demo machine (stub scan with EICAR signature recognition acceptable).
-- Production Windows installer via `electron-builder` (nice-to-have on Day 5; portable zip is acceptable fallback).
+- Production Windows **MSI/code-signed** installer (still out of scope). **Portable `.exe` via electron-builder is in scope and is the primary Day 5 artifact** per stakeholder decision.
 - DynamoDB / S3 / QuickSight integration; cross-machine queue federation.
 - Auto-start on boot, code signing, auto-update.
 - Tiered approval timeouts, multi-admin queue federation (Phase 2).
@@ -70,45 +70,48 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 | [`demo-script.md`](./demo-script.md) | The actual minute-by-minute demo walkthrough — re-anchored on the canonical USB-quarantine storyline |
 | [`scheduling-architecture.md`](./scheduling-architecture.md) | Lab + scheduling data model (Tier 1 work, folded into Day 4) |
 | [`frontend-audit.md`](./frontend-audit.md), [`frontend-audit-decisions.md`](./frontend-audit-decisions.md) | UI hygiene findings and tier decisions (Tier 1 work) |
+| [`stakeholder-decisions.md`](./stakeholder-decisions.md) | **Locked decisions** after Day 3 (demo storyline, real execution, governance, Bedrock, `.exe` priority) |
 
 ---
 
-## Status snapshot (Day 0 — entering the sprint)
+## Status snapshot (**as of Day 3 complete** — 2026-05-03)
 
 | Layer | State |
 |---|---|
-| React UI (login, access code, admin dashboard with 4 panels, student dashboard, settings, notifications) | **Done** — visually complete with mock data |
-| `electron/main.ts`, `electron/preload.ts`, `electron/db.ts` | **Written but not buildable** — deps not in `package.json`, no scripts wired |
-| `python-service/service.py` | **Written, not yet spawned** — has graceful stubs for missing libs |
-| `package.json` | **Renderer deps only** — missing `electron`, `electron-store`, `axios`, `better-sqlite3`, `electron-builder`, `concurrently`, `wait-on`, `cross-env` |
-| Real auth | **Not implemented** — `LoginPage` just `navigate(...)`s |
-| Real persistence | **Not connected** — DB schema exists, never called from IPC |
-| Tray icon asset | **Missing** — `src/imports/image.png` is referenced by `electron/main.ts` but not present |
+| React UI (login, dashboards, settings, notifications) | **Shipped** — integrated with Electron session and agentic panels |
+| `electron/main.ts`, `electron/preload.ts` | **Shipped** — session, settings, window, `python:call` (GET/POST + timeout), dialog, tray, **audit:log / audit:list**, **agent:** queue + classify + **stub `executeAction` pending Day 4 real effects** |
+| `electron/db.ts` | **Excluded from build** — audit uses **Path B** (`electron-store` JSON), per `decision-tree.md` |
+| `python-service/service.py` | **Spawned from Electron** in dev — `/health`, `/scan-file` (EICAR + ClamAV/stub), `/ai-task` (Bedrock + `local_fallback`), `/usb-list` |
+| `package.json` | **Electron + Vite + builder tooling present** — uses **`npm`** / `package-lock.json` (not pnpm) |
+| Demo auth | **Shipped** — `demoUsers.ts` + `LoginPage` → `session.set`; **audit `login` row** on success |
+| Tray icon | **`HAS_ICON` guard** — optional PNG under `src/imports/` |
 
-This snapshot drives every fallback in `decision-tree.md`. **Read that file before starting Day 1.**
+**Green tags:** `day-1-green`, `day-2-green`, `day-3-green` on the timeline that passed exit criteria. **Next:** Day 4 (canonical USB flow, governance UI, **real** `executeAction`, policy IPC). **Day 5 focus:** **portable `.exe`** as primary artifact ([`stakeholder-decisions.md`](./stakeholder-decisions.md)).
 
 ---
 
 ## Success criteria checklist (review at the end of Day 5)
 
+**Progress mid-sprint (after Day 3 sign-off):** several infrastructure and spine items below are **already satisfied** in dev; items that require Day 4+ are left unchecked. Final sign-off still happens **after three rehearsals** per `daily-checklist.md`.
+
 **Agentic spine (thesis-critical):**
-- [ ] Productivity Assistant chat panel exists in both student and admin contexts; tool whitelist visible.
-- [ ] Every assistant response shows a Risk Badge.
-- [ ] At least one HIGH-risk action appears in the Approvals Queue when triggered.
-- [ ] The queue blocks: until admin clicks Approve, the action does not execute.
-- [ ] The Approvals Queue persists across app restart.
-- [ ] Audit rows for `action_proposed`, `action_approved`, `action_executed` link via the same `approvalId`.
-- [ ] Action Timeline renders the canonical USB scenario with three labeled stages.
-- [ ] Governance footer visible on every panel.
-- [ ] Consent banner appears on first launch and is recorded in the audit log on accept.
+- [x] Productivity Assistant chat panel exists in both student and admin contexts; tool whitelist visible.
+- [x] Every assistant response shows a Risk Badge.
+- [x] At least one HIGH-risk action appears in the Approvals Queue when triggered.
+- [x] The queue blocks: until admin clicks Approve, the action does not execute. *(Executor still **stub** until Day 4 — stakeholder requires **real** effects next.)*
+- [x] The Approvals Queue persists across app restart.
+- [x] Audit rows for `action_proposed`, `action_approved`, `action_executed` link via the same `approvalId`.
+- [ ] Action Timeline renders the canonical USB scenario with three labeled stages. **— Day 4**
+- [ ] Governance footer visible on every panel. **— Day 4**
+- [ ] Consent banner appears on first launch and is recorded in the audit log on accept. **— Day 4**
 
 **Infrastructure:**
-- [ ] `npm run dev` opens an Electron window with the RUNA login.
-- [ ] Login → role routing works for both demo accounts.
-- [ ] Persistent Session checkbox survives restart.
-- [ ] **Run File Scan** opens the file picker, ClamAV (or stub) responds, audit row written.
-- [ ] Custom titlebar drag + minimize/maximize/close all work.
-- [ ] System tray icon present with at least Show/Quit/Logout menu items.
-- [ ] Demo runs in **≤ 10 minutes** without an unrecovered crash.
+- [x] `npm run dev` opens an Electron window with the RUNA login.
+- [x] Login → role routing works for both demo accounts.
+- [x] Persistent Session checkbox survives restart.
+- [x] **Run File Scan** opens the file picker, ClamAV (or stub) responds, audit row written.
+- [x] Custom titlebar drag + minimize/maximize/close all work.
+- [ ] System tray icon present with at least Show/Quit/Logout menu items. *(Menu: yes; **icon** may be absent until PNG added — `HAS_ICON`.)*
+- [ ] Demo runs in **≤ 10 minutes** without an unrecovered crash. **— validate in rehearsal (Day 5)**
 
 If 7+/9 agentic-spine items pass AND 6/7 infrastructure items pass on the day before demo, freeze scope and rehearse. Otherwise descope per `decision-tree.md`.

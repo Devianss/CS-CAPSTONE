@@ -10,14 +10,16 @@ This is the **strategic** view. For the canonical agentic design see `agentic-ar
 
 ```
 Day 1  ─── Foundation ─────────────────  Electron actually boots                   [DONE — day-1-green]
-Day 2  ─── Agentic Spine + Auth ───────  Assistant UI, Risk badges, Approvals Queue
-                                         (mock backend) + real session round-trip
-Day 3  ─── Real Wiring ────────────────  Python sidecar live: ClamAV, USB, /ai-task,
-                                         audit-log persistence
-Day 4  ─── Demo Flow + Governance ─────  Canonical USB-quarantine end-to-end +
-                                         Action Timeline + RA 10173 affordances
-Day 5  ─── Build + Rehearse ───────────  Portable, dry runs, recovery
+Day 2  ─── Agentic Spine + Auth ───────  Assistant, Risk badges, Approvals Queue,
+                                         session/auth (IPC agent + audit)         [DONE — day-2-green]
+Day 3  ─── Real Wiring ────────────────  Python sidecar: /health, /scan-file,
+                                         /ai-task, /usb-list, audit persistence    [DONE — day-3-green]
+Day 4  ─── Demo Flow + Governance ─────  Canonical USB flow, real executeAction,
+                                         Timeline, RA 10173 UI, policy IPC        [NEXT]
+Day 5  ─── Build + Rehearse ───────────  Portable .exe (primary), dry runs, recovery
 ```
+
+**Stakeholder decisions (2026-05-03):** canonical USB-first demo, **real** post-approve execution, **real** governance copy, Bedrock on defense laptop, **production-grade** simulate-USB, **`.exe`** as Day 5 primary artifact — see [`stakeholder-decisions.md`](./stakeholder-decisions.md).
 
 Each day has a single **non-negotiable exit criterion**. If a day's exit criterion is not met, **do not start the next day's work** — fall back to the corresponding branch in `decision-tree.md` and either (a) cut scope or (b) carry the gap into a documented limitation.
 
@@ -36,15 +38,17 @@ Each day has a single **non-negotiable exit criterion**. If a day's exit criteri
 - `electron/db.ts` excluded from compilation (deferred to Day 3 — Path B / `electron-store` JSON is the default unless `better-sqlite3` builds cleanly).
 - `startPythonService()` commented out (re-enabled Day 3).
 - Tray icon hardened with `HAS_ICON` guard for missing asset.
-- Day 1 changes not yet committed — commit + tag `day-1-green` before starting Day 2.
+- **Repo:** Day 1 work is committed; verify local tag `day-1-green` exists (`git tag -l`).
 
 ---
 
-## Day 2 — Agentic Spine + Auth/Session
+## Day 2 — Agentic Spine + Auth/Session **[DONE]**
 
 **Theme:** "Put the bounded agentic shape on screen, even with mock backends, and ship real session auth."
 
 This day delivers what the thesis defense will actually score against (SP2/SP3): the Productivity Assistant, risk classification, and the Approvals Queue. Backends can be mocked — the structure must exist and persist.
+
+**Implementation status:** Delivered and tagged **`day-2-green`**. Productivity Assistant gained **live `/ai-task`** on Day 3 while retaining keyword **stub fallback** when the sidecar is down.
 
 ### Deliverables (Tier 0 — Agentic Spine)
 - `src/app/agentic/types.ts` — `AgentAction`, `RiskTier`, `ApprovalRequest`, `ToolDefinition`, `AgentContext`.
@@ -54,7 +58,7 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 - `<RiskBadge />` component — LOW/MED/HIGH chip used everywhere agent actions surface.
 - `<ProductivityAssistant />` chat panel — single component, `role` prop switches mode. **Stub backend** (canned responses keyed by message content). Mounted on both student dashboard and a new admin sidebar item "ASSISTANT".
 - `<ApprovalsQueue />` admin panel — new sidebar item between AUDIT and SETTINGS. Reads from queue, dispatches Approve/Reject/Request-info. Persists across reload.
-- IPC surface: `agent:request`, `agent:list-pending`, `agent:approve`, `agent:reject`, `agent:list-tools`.
+- IPC surface: `agent:propose`, `agent:list-pending`, `agent:list-history`, `agent:approve`, `agent:reject`, `agent:request-info` (preload + `electron/main.ts`).
 
 ### Deliverables (Tier 1 — Auth/Session, original Day 2)
 - `src/app/auth/demoUsers.ts` with the two demo accounts.
@@ -67,21 +71,25 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 **(1)** A student logs in, opens the Productivity Assistant, sends a message, gets a response with a LOW RiskBadge. **(2)** A test "trigger HIGH action" button (stage-only) creates an entry in the Approvals Queue. **(3)** Admin logs in, sees the queue badge, approves it, the entry moves to history, and the demo state mutates to confirm execution. **(4)** Closing and reopening the app preserves the session AND the pending queue entries.
 
 ### Risks addressed
-- Backend dependencies (Python + Bedrock) are not on the critical path for Day 2 — UI is wired to mocks.
+- Backend dependencies (Python + Bedrock) were not on the critical path for Day 2 — UI was wired to stubs first; Day 3 added the sidecar.
 - Approvals queue persistence: covered by electron-store, no native compile.
 - Tool registry is hard-coded — no LLM tool-discovery complexity.
 
 ---
 
-## Day 3 — Real Wiring (Python sidecar live)
+## Day 3 — Real Wiring (Python sidecar live) **[DONE]**
 
 **Theme:** "Replace the mocks with real backends. Make at least three things real."
 
+**Implementation status:** Delivered and tagged **`day-3-green`**. Exit criteria **manually verified on the demo laptop** (2026-05-03). IPC proxy uses **`http://127.0.0.1`** for the sidecar to avoid Windows `localhost` / IPv6 mismatches. Health UI polls **`/health` every 5s** (checklist previously said 10s — either interval is acceptable).
+
+**Carry into Day 4:** `executeAction` in main is still a **stub** until real effects are implemented per [`stakeholder-decisions.md`](./stakeholder-decisions.md).
+
 ### Deliverables
 - Re-enable `startPythonService()` in `electron/main.ts`.
-- Health badge in admin TopBar polling `/health` every 10s.
+- Health badge in admin dashboard header polling `GET /health` (implemented: **5s** interval).
 - **Real action #1 — ClamAV `/scan-file`:** triggered from a "RUN FILE SCAN" tile in `AccessControlPanel`. Toast + audit row + tray notification.
-- **Real action #2 — `/ai-task` for the Productivity Assistant:** replace canned responses with calls to the Python sidecar's `/ai-task` endpoint, which calls Bedrock if creds present and returns a static fallback if not. Confidence score parsed from the response (or defaulted to 0.85 if missing).
+- **Real action #2 — `/ai-task` for the Productivity Assistant:** calls the Python sidecar; Bedrock when AWS creds exist, **`local_fallback`** label when not. *(Optional follow-up: parse model confidence into `confidenceScore` on chat audit rows — not blocking Day 3 exit.)*
 - **Real action #3 — `/usb-list` (and stub `/usb-quarantine`):** Python service exposes pyusb enumeration. UI shows currently connected USB devices in a small panel on the admin Lab Monitoring view.
 - **Audit-log persistence wired** (per `decision-tree.md` §2):
   - **Path A (preferred):** `better-sqlite3` builds → call `db.logEvent(...)` from main; expose `audit:list` IPC.
@@ -107,7 +115,7 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 ### Deliverables (anchor scenario)
 - `<ActionTimeline />` component — renders Perception → Reasoning → Action stages with timestamps. Receives a stream of agent events via a context.
 - `src/app/agentic/scenarios/usbInsertion.ts` — orchestrator that wires:
-  1. USB inserted (real pyusb event OR stage button) → `usb_inserted` audit row + perception event.
+  1. USB inserted (real pyusb event OR **production-grade “Simulate USB”** admin control — no dev-only styling) → `usb_inserted` audit row + perception event.
   2. ClamAV scan → reasoning event with progress.
   3. Risk classified HIGH → action proposed → enters Approvals Queue.
   4. Student sees non-blocking banner; their assistant remains usable.
@@ -149,8 +157,8 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 
 ### Deliverables (build track)
 - `electron-builder` config in `package.json` for a `--win portable` target.
-- `npm run build:win` produces `release/RUNA Lab Portal x.x.x.exe` (portable single-file `.exe`).
-- Smoke-test on the demo machine.
+- `npm run build:win` produces `release/RUNA Lab Portal x.x.x.exe` (portable single-file `.exe`). **Stakeholder: this is the primary deliverable**, not an optional stretch.
+- Smoke-test on the demo machine **using the built `.exe`** (AV warnings rehearsed).
 - (Optional, time-permitting) Migrate audit log from electron-store JSON to SQLite (Path A); add chained row-hash integrity column.
 
 ### Deliverables (rehearsal track)

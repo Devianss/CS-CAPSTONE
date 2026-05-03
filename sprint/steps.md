@@ -771,9 +771,9 @@ New admin sidebar item between AUDIT and SETTINGS. Reads from `listPending()` on
 
 The sidebar item shows a red badge with the count of pending entries — drives presenter attention during demo.
 
-### 6.8 Stage button: "Trigger HIGH action" (Day 2 only — removed by Day 4)
+### 6.8 Stage controls (Day 2 queue smoke → Day 4 canonical USB)
 
-Add a debug button somewhere on the admin Dashboard (TopBar overflow menu, behind a `NODE_ENV === 'development'` guard) that calls:
+**Day 2:** Optional **"Trigger HIGH action"** on the admin Dashboard to populate the Approvals Queue without USB hardware, e.g.:
 
 ```ts
 proposeAction({
@@ -786,7 +786,7 @@ proposeAction({
 }, 'admin@runa.edu.ph', 'admin');
 ```
 
-Use this to verify the queue works on Day 2 without needing the full USB pipeline.
+**Day 4 (stakeholder decision, 2026-05-03):** The **hardware fallback** for the canonical demo must be **production-level** — a first-class **"Simulate USB"** (or equivalent) that feeds the same orchestrator and audit trail as a real insertion. **Avoid** a visibly "debug-only" or `NODE_ENV === 'development'` affordance on the defense path; narrate Plan B honestly, but make it look like shipped product UI.
 
 ---
 

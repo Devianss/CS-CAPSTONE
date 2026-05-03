@@ -6,7 +6,23 @@ Tick boxes as you go. Each day ends when its **Exit Criterion** passes. If you c
 
 ---
 
+## Sprint progress (living)
+
+| Milestone | Status | Notes |
+|-----------|--------|--------|
+| Day 1 | **Done** | Tag `day-1-green` — Electron shell, titlebar, session store baseline |
+| Day 2 | **Done** | Tag `day-2-green` — Agentic types/classifier/registry, Approvals Queue, assistant (stub + risk), demo auth, `agent:*` + `audit:*` IPC |
+| Day 3 | **Done** | Tag `day-3-green` — Sidecar spawn, `python:call` GET/POST, `/health` badge, `/ai-task`, `/scan-file`, `/usb-list`, login + file-scan audit, dual Audit Trails surface; **exit criteria manually verified on demo laptop** (2026-05-03) |
+| Day 4 | **Next** | Canonical USB + **real** `executeAction`, Action Timeline, governance/consent (**real** copy), policy-backed overrides — see [`stakeholder-decisions.md`](./stakeholder-decisions.md) |
+| Day 5 | Pending | **Portable `.exe` is the primary artifact**; `run-demo.bat` = Plan B only |
+
+Granular unchecked boxes in older day sections are **archival**; use the table above plus each day’s **exit criterion** for gating.
+
+---
+
 ## Day 1 — Foundation (Make it boot as a desktop app)
+
+**Bulk status: complete** (tag `day-1-green`).
 
 **Exit criterion:** Frameless Electron window opens with the RUNA login. Drag, min, max, close all work.
 
@@ -62,6 +78,8 @@ git tag day-1-green
 
 ## Day 2 — Agentic Spine + Auth/Session
 
+**Bulk status: complete** (tag `day-2-green`).
+
 **Exit criterion:**
 1. Student logs in, opens Productivity Assistant, sends a message, receives a response with a LOW Risk Badge.
 2. Stage "Trigger HIGH action" button creates an Approvals Queue entry.
@@ -107,11 +125,16 @@ git tag day-1-green
 - [ ] Commit + tag `day-2-green`.
 
 ### Found-during-the-day notes
-- ...
+- **IPC names:** implemented channel is `agent:propose` (not `agent:request`); includes `agent:list-history` and `agent:request-info`.
+- **Queue + audit:** HIGH proposals persist in `electron-store`; `action_proposed` / `action_approved` / `action_executed` rows share `approvalId` (main-process `logEvent`).
+- **`executeAction`:** still a **stub** in main until Day 4 — stakeholder requires **real** side effects next sprint.
+- **Assistant:** Day 2 used keyword stub; Day 3 added **`POST /ai-task`** with sidecar fallback text when Python is unreachable.
 
 ---
 
 ## Day 3 — Real Wiring (Python sidecar live)
+
+**Bulk status: complete** (tag `day-3-green`).
 
 **Exit criterion:**
 1. Picking a file from the OS file picker shows a real ClamAV (or stub) result toast and writes an audit row that survives restart.
@@ -168,7 +191,13 @@ git tag day-1-green
 - [ ] Commit + tag `day-3-green`.
 
 ### Found-during-the-day notes
-- ...
+- **Networking:** Electron `python:call` targets **`127.0.0.1`** (avoids Windows `localhost` → `::1` vs Flask on IPv4).
+- **Python path:** dev spawn resolves `python-service/service.py` from repo root (two levels above `dist-electron/electron/`).
+- **Health poll:** UI uses **5s** interval (doc previously said 10s — both acceptable).
+- **Toasts:** **Sonner** `<Toaster />` in `App.tsx` for scan flows; legacy in-dashboard notifications unchanged.
+- **Audit Trails:** **RUNA agent / HITL log** tab calls `audit.list`; institutional attendance table remains **synthetic** for visuals until Tier 1 de-randomization (Day 4 carry-over).
+- **Bedrock:** defense laptop expected to have creds (`stakeholder-decisions.md`); service returns **`local_fallback`** when AWS errors.
+- **Next sprint hook:** replace `executeAction` stub with **production-level** behavior; add **polished** “Simulate USB” (not dev-only).
 
 ---
 
