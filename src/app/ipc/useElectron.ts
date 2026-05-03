@@ -28,7 +28,11 @@ const browserStubs: ElectronAPI = {
     close: noop,
   },
   python: {
-    call: async () => ({ ok: false, error: "Not in Electron" }),
+    call: async <T = unknown>(
+      _endpoint: string,
+      _payload?: unknown,
+      _options?: { method?: "GET" | "POST"; timeoutMs?: number },
+    ): Promise<PythonResult<T>> => ({ ok: false, error: "Not in Electron" }),
   },
   dialog: {
     openFile: async () => null,
@@ -114,8 +118,11 @@ export function usePython() {
   const { python } = useElectron();
 
   const call = useCallback(
-    <T = unknown>(endpoint: string, payload?: unknown) =>
-      python.call<T>(endpoint, payload),
+    <T = unknown>(
+      endpoint: string,
+      payload?: unknown,
+      options?: { method?: "GET" | "POST"; timeoutMs?: number },
+    ) => python.call<T>(endpoint, payload, options),
     [python],
   );
 

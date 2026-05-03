@@ -23,7 +23,8 @@ type Role = ElectronRole;
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const sessionApi = useElectron().session;
+  const api = useElectron();
+  const sessionApi = api.session;
   const [role, setRole] = useState<Role>("student");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -55,6 +56,13 @@ export function LoginPage() {
         token: `demo-${crypto.randomUUID()}`,
         persistent,
         expiresAt,
+      });
+      await api.audit.log({
+        eventType: "login",
+        detail: JSON.stringify({ email: user.email, role: user.role, persistent }),
+        actorUserId: user.email,
+        actorRole: user.role,
+        riskTier: "low",
       });
       navigate(user.role === "admin" ? "/dashboard" : "/student-dashboard");
     } finally {

@@ -5,9 +5,9 @@
  * and admin) parameterized by the `role` prop. Per-mode tools and
  * system prompts come from agentic/toolRegistry.ts.
  *
- * Backend: stub for Day 2. The `respond()` function pattern-matches
- * the prompt against tool keywords and returns a canned response.
- * Day 3 swaps this for a real Bedrock call via /ai-task.
+ * Backend: Day 3 calls the Python sidecar `POST /ai-task` (Bedrock when
+ * configured; labeled `local_fallback` otherwise). Keyword stub remains
+ * the offline fallback and for `refused` paths.
  *
  * Risk classification: every response is classified before it renders.
  * If a response would mutate state (HIGH-risk request from admin),
@@ -23,6 +23,7 @@ import type { AgentRole, RiskTier, ToolDefinition } from "../../agentic/types";
 import { getAgentContext, findTool } from "../../agentic/toolRegistry";
 import { classifyAction, explainClassification } from "../../agentic/riskClassifier";
 import { proposeAction, logAudit } from "../../agentic/approvalQueue";
+import { useElectron } from "../../ipc/useElectron";
 import { RiskBadge } from "./RiskBadge";
 
 const MONO = "'Share Tech Mono', monospace";
@@ -72,9 +73,8 @@ const REFUSAL_TEXT_ADMIN =
   'I cannot execute that action directly. I can summarize, recommend, draft, or propose actions for HITL review. State-mutating actions must go through the Approvals Queue.';
 
 /**
- * Stub responder. Pattern-matches against simple keywords. Returns a
- * canned response with the tool used. Day 3 will replace this with a
- * real /ai-task POST to the Python sidecar.
+ * Stub responder. Pattern-matches against simple keywords. Used as
+ * fallback when the sidecar is down or for authoritative refusals.
  */
 function stubRespond(prompt: string, role: AgentRole): StubResponse {
   const p = prompt.toLowerCase().trim();
@@ -198,8 +198,11 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
 // ─────────────────────────────────────────────
 //  Component
 // ─────────────────────────────────────────────
+type AiTaskBody = { ok?: boolean; response?: string; source?: string; detail?: string };
+
 export function ProductivityAssistant({ role, userId, height }: ProductivityAssistantProps) {
   const ctx = useMemo(() => getAgentContext(role, userId), [role, userId]);
+  const electron = useElectron();
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -295,20 +298,51 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       return;
     }
 
+    let assistantText = stub.text;
+    let toolUsed: string | undefined = stub.toolUsed;
+    let refused = stub.refused;
+    let sidecarSource: string | undefined;
+
+    if (!refused) {
+      const py = await electron.python.call<AiTaskBody>(
+        "/ai-task",
+        {
+          prompt: text,
+          system: ctx.systemPrompt,
+          role,
+          tools: ctx.availableTools.map((t) => t.id),
+        },
+        { method: "POST", timeoutMs: 60_000 },
+      );
+      if (py.ok && py.data && typeof py.data === "object") {
+        const body = py.data as AiTaskBody;
+        if (typeof body.response === "string" && body.response.trim().length > 0) {
+          assistantText = body.response.trim();
+          toolUsed = "ai_task";
+          refused = false;
+          sidecarSource = body.source;
+        }
+      } else if (!py.ok) {
+        assistantText =
+          stub.text +
+          `\n\n_(Python sidecar unavailable${py.error ? `: ${py.error}` : ""} — keyword fallback.)_`;
+      }
+    }
+
     // Non-HITL response path: classify, log, render.
     const responseAction = {
-      type: stub.refused ? "chat_response" : (stub.toolUsed ?? "chat_response"),
+      type: refused ? "chat_response" : (toolUsed ?? "chat_response"),
       scope: "self" as const,
       reversible: true,
-      payload: { responseLength: stub.text.length },
-      reasoning: stub.refused
+      payload: { responseLength: assistantText.length },
+      reasoning: refused
         ? "Out-of-scope request refused per role's tool whitelist"
-        : `Assistant tool: ${stub.toolUsed ?? "chat_response"}`,
+        : `Assistant tool: ${toolUsed ?? "chat_response"}`,
     };
     const tier: RiskTier = classifyAction({
       ...responseAction,
-      type: stub.toolUsed && findTool(role, stub.toolUsed)?.riskTier
-        ? stub.toolUsed
+      type: toolUsed && findTool(role, toolUsed)?.riskTier
+        ? toolUsed
         : "chat_response",
     } as never) ?? "low";
 
@@ -316,12 +350,12 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
     // a tool id, not an action type). Fall back to looking up the tier
     // directly from the registry.
     const tierFromRegistry: RiskTier =
-      stub.toolUsed && findTool(role, stub.toolUsed)
-        ? (findTool(role, stub.toolUsed) as ToolDefinition).riskTier
+      toolUsed && findTool(role, toolUsed)
+        ? (findTool(role, toolUsed) as ToolDefinition).riskTier
         : "low";
-    const finalTier = stub.refused ? "low" : tierFromRegistry;
+    const finalTier = refused ? "low" : tierFromRegistry;
 
-    const reason = stub.refused
+    const reason = refused
       ? "Out-of-scope request — refused per role's tool whitelist"
       : explainClassification({ ...responseAction, type: "chat_response" });
 
@@ -330,26 +364,26 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       {
         id: `a-${Date.now()}`,
         from: "assistant",
-        text: stub.text,
+        text: assistantText,
         ts: Date.now(),
         riskTier: finalTier,
-        toolUsed: stub.toolUsed,
-        refused: stub.refused,
+        toolUsed,
+        refused,
       },
     ]);
 
     await logAudit({
-      eventType: stub.refused ? "request_refused" : "chat_response",
-      detail: JSON.stringify({ tool: stub.toolUsed ?? null, reason }),
+      eventType: refused ? "request_refused" : "chat_response",
+      detail: JSON.stringify({ tool: toolUsed ?? null, reason, sidecarSource }),
       actorUserId: "system",
       actorRole: "agent",
       riskTier: finalTier,
     });
 
-    if (stub.toolUsed && !stub.refused) {
+    if (toolUsed && !refused) {
       await logAudit({
         eventType: "tool_invoked",
-        detail: JSON.stringify({ tool: stub.toolUsed }),
+        detail: JSON.stringify({ tool: toolUsed, sidecarSource }),
         actorUserId: "system",
         actorRole: "agent",
         riskTier: finalTier,

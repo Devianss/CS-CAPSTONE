@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useElectron } from "../ipc/useElectron";
 import {
   Download,
   Filter,
@@ -173,7 +174,22 @@ function EventBadge({ event }: { event: SecurityEvent }) {
   );
 }
 
+type AuditSurface = "hardware" | "runa";
+
+interface RunaAuditRow {
+  id: number;
+  createdAt: number;
+  eventType: string;
+  actorUserId: string;
+  actorRole?: string;
+  riskTier?: string;
+  approvalId?: string;
+}
+
 export function AuditTrailsPanel() {
+  const electron = useElectron();
+  const [surface, setSurface] = useState<AuditSurface>("hardware");
+  const [runaRows, setRunaRows] = useState<RunaAuditRow[]>([]);
   const [activeTab, setActiveTab] = useState("COMLAB 8");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -181,6 +197,20 @@ export function AuditTrailsPanel() {
   const [dateFrom, setDateFrom] = useState("2026-04-21");
   const [dateTo, setDateTo] = useState("2026-04-21");
   const ROWS_PER_PAGE = 4;
+
+  const refreshRuna = useCallback(async () => {
+    try {
+      const rows = await electron.audit.list(200);
+      setRunaRows(rows as RunaAuditRow[]);
+    } catch {
+      setRunaRows([]);
+    }
+  }, [electron]);
+
+  useEffect(() => {
+    if (surface !== "runa") return;
+    void refreshRuna();
+  }, [surface, refreshRuna]);
 
   const logs = logsPerLab[activeTab] ?? [];
   const filtered = logs.filter(
@@ -197,6 +227,104 @@ export function AuditTrailsPanel() {
 
   return (
     <div className="h-full overflow-y-auto" style={{ background: "#0d1320", fontFamily: GROTESK }}>
+      <div className="sticky top-0 z-10 flex gap-2 px-4 py-2 border-b border-[#1a2640]" style={{ background: "#0a1020" }}>
+        <button
+          type="button"
+          onClick={() => setSurface("hardware")}
+          className="px-3 py-1.5 rounded border transition-colors"
+          style={{
+            fontFamily: MONO,
+            fontSize: "10px",
+            borderColor: surface === "hardware" ? "#3a6fff" : "#2a3a55",
+            color: surface === "hardware" ? "#c5d5ea" : "#4a6080",
+            background: surface === "hardware" ? "#162035" : "transparent",
+          }}
+        >
+          Institutional attendance
+        </button>
+        <button
+          type="button"
+          onClick={() => setSurface("runa")}
+          className="px-3 py-1.5 rounded border transition-colors"
+          style={{
+            fontFamily: MONO,
+            fontSize: "10px",
+            borderColor: surface === "runa" ? "#3a6fff" : "#2a3a55",
+            color: surface === "runa" ? "#c5d5ea" : "#4a6080",
+            background: surface === "runa" ? "#162035" : "transparent",
+          }}
+        >
+          RUNA agent / HITL log
+        </button>
+      </div>
+
+      {surface === "runa" ? (
+        <div className="p-6 space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: GROTESK }}>
+              Events persisted in electron-store (login, scans, chat, HITL decisions).
+            </p>
+            <button
+              type="button"
+              onClick={() => void refreshRuna()}
+              className="shrink-0 px-3 py-1.5 rounded border text-[#7eb5f5] hover:bg-[#1e2e48] transition-colors"
+              style={{ fontSize: "10px", fontFamily: MONO, borderColor: "#2a3a55" }}
+            >
+              Refresh
+            </button>
+          </div>
+          <div className="rounded-xl border overflow-hidden" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+            <div
+              className="grid px-4 py-2 border-b border-[#1a2640] text-[#4a6080] uppercase tracking-widest"
+              style={{
+                fontSize: "8px",
+                fontFamily: MONO,
+                gridTemplateColumns: "56px 130px minmax(0,1fr) 88px 56px minmax(0,0.8fr)",
+              }}
+            >
+              <span>ID</span>
+              <span>Time</span>
+              <span>Event</span>
+              <span>Actor</span>
+              <span>Risk</span>
+              <span>Approval</span>
+            </div>
+            {runaRows.length === 0 ? (
+              <p className="py-8 text-center text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>
+                No audit rows yet. Log in, use the assistant, file scan, or approvals queue.
+              </p>
+            ) : (
+              runaRows.map((row) => (
+                <div
+                  key={row.id}
+                  className="grid px-4 py-2 border-b border-[#1a2640] items-start gap-x-1"
+                  style={{
+                    gridTemplateColumns: "56px 130px minmax(0,1fr) 88px 56px minmax(0,0.8fr)",
+                    fontSize: "10px",
+                    fontFamily: MONO,
+                  }}
+                >
+                  <span className="text-[#7eb5f5]">{row.id}</span>
+                  <span className="text-[#4a6080]">
+                    {new Date(row.createdAt).toLocaleString("en-GB", {
+                      day: "2-digit",
+                      month: "short",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })}
+                  </span>
+                  <span className="text-[#c5d5ea] break-all">{row.eventType}</span>
+                  <span className="text-[#4a6080] truncate" title={row.actorUserId}>{row.actorUserId}</span>
+                  <span className="text-[#a06820]">{row.riskTier ?? "—"}</span>
+                  <span className="text-[#2a3a55] truncate" title={row.approvalId ?? ""}>{row.approvalId ?? "—"}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      ) : (
+      <>
       {/* Header */}
       <div className="px-7 pt-5 pb-4 border-b border-[#1a2640]" style={{ background: "#0f1828" }}>
         <div className="flex items-start justify-between">
@@ -525,6 +653,8 @@ export function AuditTrailsPanel() {
           COMLAB 8-11 CONNECTED
         </span>
       </div>
+      </>
+      )}
     </div>
   );
 }

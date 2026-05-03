@@ -28,6 +28,7 @@ import { AuditTrailsPanel } from "./AuditTrailsPanel";
 import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
 import { ApprovalsQueue } from "./agentic/ApprovalsQueue";
 import { RiskBadge } from "./agentic/RiskBadge";
+import { PythonServiceBadge } from "./PythonServiceBadge";
 import { useElectron } from "../ipc/useElectron";
 import { findDemoUser } from "../auth/demoUsers";
 import { listPending, proposeAction } from "../agentic/approvalQueue";
@@ -193,6 +194,7 @@ export function Dashboard() {
         </div>
 
         <div className="flex items-center gap-4">
+          <PythonServiceBadge />
           <div
             className="relative flex items-center gap-2 border border-[#1e2e48] rounded-sm px-3 py-1.5"
             style={{ background: "#111d30" }}

@@ -58,6 +58,53 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# EICAR standard test string (embedded in many AV test files)
+EICAR_MARKER = b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE"
+
+AI_OFFLINE_FALLBACK = (
+    "The AI sidecar is running, but Amazon Bedrock could not be reached from this machine "
+    "(missing AWS credentials, network policy, or model access). This is a labeled offline response — "
+    "your message was still received. For the thesis demo, configure AWS CLI credentials with "
+    "Bedrock invoke permissions, or continue using keyword-based stubs in the UI."
+)
+
+
+def _sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _enumerate_usb_devices() -> list[dict]:
+    devices: list[dict] = []
+    if USB_AVAILABLE:
+        try:
+            for dev in usb.core.find(find_all=True):
+                devices.append(
+                    {
+                        "vendor_id": hex(dev.idVendor),
+                        "product_id": hex(dev.idProduct),
+                        "manufacturer": dev.manufacturer if hasattr(dev, "manufacturer") else None,
+                        "product": dev.product if hasattr(dev, "product") else None,
+                    }
+                )
+        except Exception as e:
+            log.error("USB enumeration error: %s", e)
+    else:
+        log.warning("pyusb not installed – returning stub USB list")
+        devices = [
+            {
+                "vendor_id": "0x0000",
+                "product_id": "0x0000",
+                "manufacturer": "Stub",
+                "product": "No pyusb — install pyusb for live USB",
+            }
+        ]
+    return devices
+
+
 # ─────────────────────────────────────────────
 #  AWS clients (lazy-init so startup is fast)
 # ─────────────────────────────────────────────
@@ -100,12 +147,29 @@ def health():
 def scan_file():
     body = request.get_json(force=True)
     file_path: str = body.get("path", "")
+    p = Path(file_path)
 
-    if not file_path or not Path(file_path).exists():
+    if not file_path or not p.is_file():
         return jsonify(ok=False, error="File not found"), 400
 
-    # File hash (always computed)
-    sha256 = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
+    try:
+        with p.open("rb") as f:
+            head = f.read(65536)
+    except OSError as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+    if EICAR_MARKER in head:
+        sha256 = _sha256_file(p)
+        log.info("scan-file EICAR test signature detected: %s", file_path)
+        return jsonify(
+            ok=True,
+            clean=False,
+            threat="EICAR-TEST-SIGNATURE",
+            sha256=sha256,
+            engine="builtin-eicar",
+        )
+
+    sha256 = _sha256_file(p)
 
     if CLAMD_AVAILABLE:
         try:
@@ -118,37 +182,25 @@ def scan_file():
             log.error("ClamAV error: %s", e)
             clean, threat = True, None  # fallback: allow
     else:
-        # Stub: always clean in dev
         clean, threat = True, None
-        log.warning("ClamAV not installed – returning stub result")
+        log.warning("ClamAV not installed – returning stub result (file hashed)")
 
     log.info("scan-file %s → clean=%s", file_path, clean)
-    return jsonify(ok=True, clean=clean, threat=threat, sha256=sha256)
+    return jsonify(ok=True, clean=clean, threat=threat, sha256=sha256, engine="clamd" if CLAMD_AVAILABLE else "stub")
 
 
 # ─────────────────────────────────────────────
-#  /scan-usb  – USB device enumeration
+#  /usb-list (GET) + /scan-usb (POST) – USB enumeration
 # ─────────────────────────────────────────────
+@app.get("/usb-list")
+def usb_list():
+    devices = _enumerate_usb_devices()
+    return jsonify(ok=True, devices=devices, count=len(devices))
+
+
 @app.post("/scan-usb")
 def scan_usb():
-    devices = []
-    if USB_AVAILABLE:
-        try:
-            for dev in usb.core.find(find_all=True):
-                devices.append(
-                    {
-                        "vendor_id": hex(dev.idVendor),
-                        "product_id": hex(dev.idProduct),
-                        "manufacturer": dev.manufacturer if hasattr(dev, "manufacturer") else None,
-                        "product": dev.product if hasattr(dev, "product") else None,
-                    }
-                )
-        except Exception as e:
-            log.error("USB enumeration error: %s", e)
-    else:
-        log.warning("pyusb not installed – returning stub USB list")
-        devices = [{"vendor_id": "0x0000", "product_id": "0x0000", "manufacturer": "Stub", "product": "StubDevice"}]
-
+    devices = _enumerate_usb_devices()
     return jsonify(ok=True, devices=devices, count=len(devices))
 
 
@@ -178,15 +230,23 @@ def ai_task():
     prompt: str = body.get("prompt", "")
     system: str = body.get("system", "You are a helpful lab management assistant for PCU Lab Portal.")
     max_tokens: int = body.get("max_tokens", 1024)
+    role: str = body.get("role", "student")
+    tools = body.get("tools") or []
 
     if not prompt:
         return jsonify(ok=False, error="prompt required"), 400
+
+    tool_hint = ""
+    if isinstance(tools, list) and tools:
+        tool_hint = f"\n\nRegistered tool ids for this session: {', '.join(str(t) for t in tools)}."
+
+    full_system = f"{system}{tool_hint}\n\nUser role tag: {role}."
 
     try:
         payload = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
-            "system": system,
+            "system": full_system,
             "messages": [{"role": "user", "content": prompt}],
         }
         response = bedrock_client().invoke_model(
@@ -198,11 +258,22 @@ def ai_task():
         result = json.loads(response["body"].read())
         text = result["content"][0]["text"]
         log.info("ai-task completed (%d chars)", len(text))
-        return jsonify(ok=True, response=text, input_tokens=result["usage"]["input_tokens"])
+        return jsonify(
+            ok=True,
+            response=text,
+            source="bedrock",
+            input_tokens=result["usage"]["input_tokens"],
+        )
 
     except Exception as e:
         log.error("Bedrock error: %s", e)
-        return jsonify(ok=False, error=str(e)), 500
+        # Always return 200 so the Electron shell can render a labeled fallback during demos.
+        return jsonify(
+            ok=True,
+            response=AI_OFFLINE_FALLBACK,
+            source="local_fallback",
+            detail=str(e)[:400],
+        )
 
 
 # ─────────────────────────────────────────────

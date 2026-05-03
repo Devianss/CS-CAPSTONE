@@ -72,8 +72,9 @@ const api = {
     call: <T = unknown>(
       endpoint: string,
       payload?: unknown,
+      options?: { method?: "GET" | "POST"; timeoutMs?: number },
     ): Promise<PythonResult<T>> =>
-      ipcRenderer.invoke("python:call", endpoint, payload),
+      ipcRenderer.invoke("python:call", endpoint, payload ?? null, options ?? null),
   },
 
   dialog: {

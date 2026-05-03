@@ -114,6 +114,8 @@ interface StoreSchema {
 const IS_DEV = process.env.NODE_ENV === "development";
 const PYTHON_PORT = 5001;
 const VITE_DEV_SERVER_URL = "http://localhost:5173";
+/** Prefer loopback IPv4 — avoids Windows resolving `localhost` to ::1 while Flask binds 127.0.0.1. */
+const PYTHON_BASE_URL = `http://127.0.0.1:${PYTHON_PORT}`;
 
 // Optional brand icon. If the asset is missing we silently fall back
 // to Electron's default icon and skip the system tray (acceptable per
@@ -229,32 +231,51 @@ let pythonProcess: ChildProcess | null = null;
 //  Python microservice launcher
 // ─────────────────────────────────────────────
 function startPythonService(): void {
-  const isPacked = app.isPackaged;
+  try {
+    const isPacked = app.isPackaged;
+    const serviceExe = path.join(process.resourcesPath, "python-service", "service.exe");
+    // Compiled main lives in dist-electron/electron/ — repo root is two levels up.
+    const scriptPath = path.join(__dirname, "..", "..", "python-service", "service.py");
 
-  // In production the service is a bundled .exe / binary next to the app
-  const servicePath = isPacked
-    ? path.join(process.resourcesPath, "python-service", "service.exe")
-    : path.join(__dirname, "..", "python-service", "service.py");
+    let cmd: string;
+    let args: string[];
 
-  const cmd = isPacked ? servicePath : "python";
-  const args = isPacked ? [] : [servicePath];
+    if (isPacked) {
+      cmd = serviceExe;
+      args = [];
+    } else if (!fs.existsSync(scriptPath)) {
+      console.warn(`[main] Python service script not found at ${scriptPath} — sidecar disabled.`);
+      return;
+    } else {
+      cmd = process.env.PCU_PYTHON_EXE || (process.platform === "win32" ? "python" : "python3");
+      args = [scriptPath];
+    }
 
-  console.log(`[main] Starting Python service: ${cmd} ${args.join(" ")}`);
+    console.log(`[main] Starting Python service: ${cmd} ${args.join(" ")}`);
 
-  pythonProcess = spawn(cmd, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, FLASK_PORT: String(PYTHON_PORT) },
-  });
+    pythonProcess = spawn(cmd, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, FLASK_PORT: String(PYTHON_PORT) },
+      windowsHide: true,
+    });
 
-  pythonProcess.stdout?.on("data", (d) =>
-    console.log("[python]", d.toString().trim())
-  );
-  pythonProcess.stderr?.on("data", (d) =>
-    console.error("[python:err]", d.toString().trim())
-  );
-  pythonProcess.on("exit", (code) =>
-    console.warn(`[main] Python service exited with code ${code}`)
-  );
+    pythonProcess.on("error", (err) => {
+      console.error("[main] Python sidecar failed to start:", err.message);
+      pythonProcess = null;
+    });
+
+    pythonProcess.stdout?.on("data", (d) =>
+      console.log("[python]", d.toString().trim()),
+    );
+    pythonProcess.stderr?.on("data", (d) =>
+      console.error("[python:err]", d.toString().trim()),
+    );
+    pythonProcess.on("exit", (code) =>
+      console.warn(`[main] Python service exited with code ${code}`),
+    );
+  } catch (e) {
+    console.error("[main] startPythonService:", e);
+  }
 }
 
 function stopPythonService(): void {
@@ -410,21 +431,31 @@ function registerIpcHandlers(): void {
   // ── Python microservice proxy ────────────────
   ipcMain.handle(
     "python:call",
-    async (_event, endpoint: string, payload: unknown) => {
+    async (
+      _event,
+      endpoint: string,
+      payload?: unknown,
+      options?: { method?: "GET" | "POST"; timeoutMs?: number },
+    ) => {
       const { default: axios } = await import("axios");
+      const method = options?.method ?? "POST";
+      const timeoutMs = options?.timeoutMs ?? 15_000;
+      const url = `${PYTHON_BASE_URL}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
       try {
-        const res = await axios.post(
-          `http://localhost:${PYTHON_PORT}${endpoint}`,
-          payload,
-          { timeout: 15_000 }
-        );
+        const res =
+          method === "GET"
+            ? await axios.get(url, { timeout: timeoutMs })
+            : await axios.post(url, payload ?? {}, {
+                timeout: timeoutMs,
+                headers: { "Content-Type": "application/json" },
+              });
         return { ok: true, data: res.data };
       } catch (err: unknown) {
         const message =
           err instanceof Error ? err.message : "Python service error";
         return { ok: false, error: message };
       }
-    }
+    },
   );
 
   // ── File dialog ─────────────────────────────
@@ -675,7 +706,7 @@ function registerIpcHandlers(): void {
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
   registerIpcHandlers();
-  // startPythonService();  // Re-enabled on Day 3 of the demo sprint
+  startPythonService();
   mainWindow = createMainWindow();
   tray = createTray();
 

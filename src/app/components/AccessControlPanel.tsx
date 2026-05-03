@@ -1,5 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import { Lock, Power, Shield, AlertTriangle, Activity, ChevronRight, X } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Lock, Power, Shield, AlertTriangle, Activity, ChevronRight, X, FileSearch } from "lucide-react";
+import { toast } from "sonner";
+import { useElectron } from "../ipc/useElectron";
+import { logAudit, proposeAction } from "../agentic/approvalQueue";
 
 const MONO = "'Space Mono', monospace";
 const GROTESK = "'Space Grotesk', sans-serif";
@@ -42,13 +45,100 @@ const levelStyle: Record<string, { color: string; prefix: string }> = {
 };
 
 export function AccessControlPanel() {
+  const api = useElectron();
   const [lockConfirm, setLockConfirm] = useState(false);
   const [terminateConfirm, setTerminateConfirm] = useState(false);
   const [locked, setLocked] = useState(false);
   const [terminated, setTerminated] = useState(false);
   const [sessionNodes] = useState(() => 18);
   const [logs, setLogs] = useState(realTimeLogs);
+  const [actorId, setActorId] = useState("");
+  const [fileScanBusy, setFileScanBusy] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    void api.session.get().then((s) => {
+      if (s?.userId) setActorId(s.userId);
+    });
+  }, [api]);
+
+  const runFileScan = useCallback(async () => {
+    const filePath = await api.dialog.openFile();
+    if (!filePath) return;
+    setFileScanBusy(true);
+    const uid = actorId || "admin";
+    try {
+      const res = await api.python.call<{
+        ok?: boolean;
+        clean?: boolean;
+        threat?: string | null;
+        sha256?: string;
+        engine?: string;
+        error?: string;
+      }>("/scan-file", { path: filePath }, { method: "POST", timeoutMs: 120_000 });
+
+      if (!res.ok || res.data === undefined || res.data === null) {
+        toast.error("Scan failed", { description: res.error ?? "Unknown error" });
+        return;
+      }
+
+      const d = res.data as {
+        ok?: boolean;
+        clean?: boolean;
+        threat?: string | null;
+        sha256?: string;
+        engine?: string;
+        error?: string;
+      };
+
+      if (d.ok === false) {
+        toast.error("Scan rejected", { description: d.error ?? "Bad response" });
+        return;
+      }
+
+      await logAudit({
+        eventType: "file_scan",
+        detail: JSON.stringify({
+          path: filePath,
+          clean: d.clean,
+          threat: d.threat,
+          sha256: d.sha256,
+          engine: d.engine,
+        }),
+        actorUserId: uid,
+        actorRole: "admin",
+        riskTier: d.clean ? "low" : "high",
+      });
+
+      if (d.clean) {
+        toast.success("File scan clean", {
+          description: d.sha256
+            ? `${d.sha256.slice(0, 20)}… (${d.engine ?? "?"})`
+            : String(d.engine ?? "clean"),
+        });
+      } else {
+        toast.error("Threat detected", { description: d.threat ?? "Flagged" });
+        await proposeAction(
+          {
+            type: "quarantine_usb",
+            scope: "lab",
+            reversible: true,
+            payload: { source: "file_scan", path: filePath, threat: d.threat, sha256: d.sha256 },
+            confidence: 0.95,
+            reasoning: `File scan flagged (${d.threat ?? "unknown"}) for path: ${filePath}`,
+          },
+          uid,
+          "admin",
+          { scanResult: d, sourceAlert: d.threat ?? "file_scan" },
+        );
+        api.tray.notify("RUNA Security", `Threat scan: ${d.threat ?? "flagged"} — queued for HITL.`);
+      }
+    } catch (e) {
+      toast.error("Scan error", { description: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setFileScanBusy(false);
+    }
+  }, [api, actorId]);
 
   // Simulate incoming log lines
   useEffect(() => {
@@ -250,6 +340,30 @@ export function AccessControlPanel() {
               </div>
               <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
                 {terminated ? "All sessions cleared" : "Immediately force-sign all active users"}
+              </p>
+            </div>
+
+            <div
+              className={`p-4 rounded-lg mb-3 border transition-all ${fileScanBusy ? "opacity-50 pointer-events-none" : "cursor-pointer hover:brightness-110"}`}
+              style={{ background: "#101e30", borderColor: "#3a6fff50" }}
+              onClick={() => void runFileScan()}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  void runFileScan();
+                }
+              }}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
+                  Run file scan
+                </span>
+                <FileSearch size={14} className="text-[#7eb5f5]" />
+              </div>
+              <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                ClamAV sidecar (EICAR-aware). Dirty files queue quarantine_usb for HITL.
               </p>
             </div>
 

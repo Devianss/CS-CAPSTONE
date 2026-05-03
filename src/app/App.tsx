@@ -9,6 +9,7 @@
  *   └──────────────────────┘
  */
 import { RouterProvider } from "react-router";
+import { Toaster } from "sonner";
 import { router } from "./routes";
 import { TitleBar } from "./components/TitleBar";
 
@@ -19,6 +20,7 @@ export default function App() {
       <div style={{ flex: 1, overflow: "hidden" }}>
         <RouterProvider router={router} />
       </div>
+      <Toaster richColors position="bottom-right" theme="dark" closeButton />
     </div>
   );
 }

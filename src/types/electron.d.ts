@@ -134,7 +134,11 @@ interface ElectronAPI {
     close(): void;
   };
   python: {
-    call<T = unknown>(endpoint: string, payload?: unknown): Promise<PythonResult<T>>;
+    call<T = unknown>(
+      endpoint: string,
+      payload?: unknown,
+      options?: { method?: "GET" | "POST"; timeoutMs?: number },
+    ): Promise<PythonResult<T>>;
   };
   dialog: {
     openFile(filters?: { name: string; extensions: string[] }[]): Promise<string | null>;

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { AlertTriangle, Users, Activity, MoreHorizontal, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, Users, Activity, MoreHorizontal, RefreshCw, X, Usb } from "lucide-react";
+import { useElectron } from "../ipc/useElectron";
 
 const MONO = "'Space Mono', monospace";
 const GROTESK = "'Space Grotesk', sans-serif";
@@ -40,6 +41,13 @@ const attendance = [
   { name: "Alex Mercado", id: "2024-CS-019", pc: "PC-41", ip: "192.168.1.103", status: "ONLINE", color: "#4ac77e" },
 ];
 
+type UsbDevice = {
+  vendor_id?: string;
+  product_id?: string;
+  manufacturer?: string | null;
+  product?: string | null;
+};
+
 const professors: Record<string, { name: string; subject: string; timeRange: string }> = {
   "08": { name: "Prof. Andy Anciro", subject: "Cybersecurity", timeRange: "09:00 — 12:00" },
   "09": { name: "Prof. Maria Santos", subject: "Application Dev", timeRange: "10:00 — 13:00" },
@@ -48,16 +56,45 @@ const professors: Record<string, { name: string; subject: string; timeRange: str
 };
 
 export function LabMonitoringPanel() {
+  const api = useElectron();
   const [activeTab, setActiveTab] = useState("08");
   const [pcs] = useState(() => generatePCs(30, 0));
   const [sessionSecs, setSessionSecs] = useState(96 * 60);
   const [showAlert, setShowAlert] = useState(true);
   const [expandedPC, setExpandedPC] = useState<string | null>("PC-01");
+  const [usbDevices, setUsbDevices] = useState<UsbDevice[]>([]);
+  const [usbError, setUsbError] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setInterval(() => setSessionSecs((s) => (s > 0 ? s - 1 : 0)), 1000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const pollUsb = async () => {
+      const r = await api.python.call<{ ok?: boolean; devices?: UsbDevice[]; count?: number }>(
+        "/usb-list",
+        undefined,
+        { method: "GET", timeoutMs: 8000 },
+      );
+      if (cancelled) return;
+      if (r.ok && r.data && typeof r.data === "object" && (r.data as { ok?: boolean }).ok !== false) {
+        const body = r.data as { devices?: UsbDevice[]; count?: number };
+        setUsbDevices(Array.isArray(body.devices) ? body.devices : []);
+        setUsbError(null);
+      } else {
+        setUsbDevices([]);
+        setUsbError(r.error ?? "unreachable");
+      }
+    };
+    void pollUsb();
+    const id = setInterval(() => void pollUsb(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [api]);
 
   const mm = Math.floor(sessionSecs / 60);
   const ss = sessionSecs % 60;
@@ -163,6 +200,45 @@ export function LabMonitoringPanel() {
               {activeTab === "08" ? "ELEVATED" : "NORMAL"}
             </span>
           </div>
+        </div>
+
+        <div
+          className="rounded-xl border px-4 py-3 flex flex-wrap items-start gap-3"
+          style={{ background: "#111d30", borderColor: "#1e2e48" }}
+        >
+          <div className="flex items-center gap-2 shrink-0">
+            <Usb size={14} className="text-[#7eb5f5]" />
+            <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
+              USB bus (sidecar)
+            </span>
+            <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+              refresh 5s
+            </span>
+          </div>
+          {usbError ? (
+            <p className="text-[#e8821a]" style={{ fontSize: "10px", fontFamily: MONO }}>
+              {usbError}
+            </p>
+          ) : usbDevices.length === 0 ? (
+            <p className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
+              No devices reported (pyusb optional).
+            </p>
+          ) : (
+            <ul className="flex flex-wrap gap-2 m-0 p-0 list-none flex-1 min-w-0">
+              {usbDevices.slice(0, 12).map((d, i) => (
+                <li
+                  key={`${d.vendor_id}-${d.product_id}-${i}`}
+                  className="px-2 py-1 rounded border text-[#4a6080]"
+                  style={{ borderColor: "#2a3a55", fontSize: "9px", fontFamily: MONO }}
+                >
+                  {(d.manufacturer ?? "?")} · {(d.product ?? "device")}{" "}
+                  <span className="text-[#2a3a55]">
+                    {d.vendor_id}/{d.product_id}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         <div className="grid grid-cols-3 gap-5">
