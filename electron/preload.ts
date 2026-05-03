@@ -84,6 +84,63 @@ const api = {
       ipcRenderer.invoke("dialog:openFile", filters),
   },
 
+  lab: {
+    getShortcuts: (): Promise<
+      Array<{ id: string; label: string; targetPath: string }>
+    > => ipcRenderer.invoke("lab:get-shortcuts"),
+    addShortcut: (payload: {
+      label: string;
+      targetPath: string;
+    }): Promise<
+      | { ok: true; shortcuts: Array<{ id: string; label: string; targetPath: string }>; item: { id: string; label: string; targetPath: string } }
+      | { ok: false; shortcuts: Array<{ id: string; label: string; targetPath: string }>; error: string }
+    > => ipcRenderer.invoke("lab:add-shortcut", payload),
+    updateShortcut: (payload: {
+      id: string;
+      label: string;
+      targetPath: string;
+    }): Promise<
+      | { ok: true; shortcuts: Array<{ id: string; label: string; targetPath: string }>; item: { id: string; label: string; targetPath: string } }
+      | { ok: false; shortcuts: Array<{ id: string; label: string; targetPath: string }>; error: string }
+    > => ipcRenderer.invoke("lab:update-shortcut", payload),
+    removeShortcut: (
+      id: string,
+    ): Promise<
+      | { ok: true; shortcuts: Array<{ id: string; label: string; targetPath: string }> }
+      | { ok: false; shortcuts: Array<{ id: string; label: string; targetPath: string }>; error: string }
+    > => ipcRenderer.invoke("lab:remove-shortcut", id),
+    launch: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke("lab:launch", id),
+  },
+
+  runaFiles: {
+    getVaultRoot: (): Promise<{ ok: boolean; path: string | null; error?: string }> =>
+      ipcRenderer.invoke("runaFiles:getVaultRoot"),
+    getSessionWorkspaceRelative: (): Promise<{
+      ok: boolean;
+      relative: string | null;
+      error?: string;
+    }> => ipcRenderer.invoke("runaFiles:getSessionWorkspaceRelative"),
+    createFolder: (
+      relativePath: string,
+    ): Promise<{ ok: boolean; error?: string; absolute?: string }> =>
+      ipcRenderer.invoke("runaFiles:createFolder", relativePath),
+    writeTextFile: (
+      relativePath: string,
+      content: string,
+    ): Promise<{ ok: boolean; error?: string; absolute?: string }> =>
+      ipcRenderer.invoke("runaFiles:writeTextFile", relativePath, content),
+    listDir: (
+      relativePath: string,
+    ): Promise<{ ok: boolean; entries: string[]; error?: string }> =>
+      ipcRenderer.invoke("runaFiles:listDir", relativePath),
+  },
+
+  telemetry: {
+    record: (event: string, meta?: Record<string, unknown>): Promise<boolean> =>
+      ipcRenderer.invoke("telemetry:record", event, meta ?? {}),
+  },
+
   tray: {
     notify: (title: string, body: string): void => {
       ipcRenderer.invoke("tray:notify", title, body);

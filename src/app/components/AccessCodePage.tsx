@@ -167,7 +167,7 @@ export function AccessCodePage() {
         </div>
 
         {/* Two-column layout */}
-        <div className="relative z-10 w-full max-w-5xl flex flex-col md:flex-row items-center gap-12">
+        <div className="relative z-[var(--z-banner)] w-full max-w-5xl flex flex-col md:flex-row items-center gap-12">
           {/* Left: Title & Info */}
           <div className="flex-1 min-w-0">
             <p
@@ -363,7 +363,7 @@ export function AccessCodePage() {
       </div>
 
       {/* Bottom status bar */}
-      <div className="flex items-center justify-between px-8 pb-6 relative z-10">
+      <div className="flex items-center justify-between px-8 pb-6 relative z-[var(--z-banner)]">
         <div className="flex items-center gap-2 border border-[#1e2e48] bg-[#111d30] px-4 py-2 rounded-sm">
           <Shield size={12} className="text-[#4a6fa5]" />
           <span
@@ -378,7 +378,7 @@ export function AccessCodePage() {
           className="text-[#2a3a55] tracking-widest uppercase"
           style={{ fontSize: "9px", fontFamily: MONO }}
         >
-          Global Security Perimeter V2.1
+          PCU-Dasmariñas · RUNA
         </span>
 
         <div className="flex items-center gap-3">
@@ -386,7 +386,7 @@ export function AccessCodePage() {
             className="text-[#2a3a55] tracking-widest uppercase"
             style={{ fontSize: "9px", fontFamily: MONO }}
           >
-            © RUNA Systems
+            © RUNA
           </span>
           <div className="flex items-center gap-1">
             <div className="w-2 h-2 rounded-full bg-[#2a3a55]" />

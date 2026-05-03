@@ -1,16 +1,19 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { AlertTriangle, Users, Activity, MoreHorizontal, RefreshCw, X, Usb } from "lucide-react";
+import { useNotificationContext } from "../providers/NotificationProvider";
 import { useElectron } from "../ipc/useElectron";
+import { useAdminLab } from "../context/AdminLabContext";
+import {
+  ATTENDANCE_BY_LAB,
+  COMLAB_DEFINITIONS,
+  COMLAB_IDS,
+  buildMonitoringPcs,
+  getComlab,
+  type ComlabId,
+} from "../data/comlabs";
 
 const MONO = "'Space Mono', monospace";
 const GROTESK = "'Space Grotesk', sans-serif";
-
-const COMLABS = [
-  { id: "08", label: "COMLAB 08", incident: 1, health: "CYBERSECURITY" },
-  { id: "09", label: "COMLAB 09", incident: 0, health: "HEALTHY" },
-  { id: "10", label: "COMLAB 10", incident: 0, health: "HEALTHY" },
-  { id: "11", label: "COMLAB 11", incident: 0, health: "HEALTHY" },
-];
 
 type PCStatus = "active" | "idle" | "alert" | "offline";
 
@@ -21,26 +24,6 @@ const PC_STATUS_STYLE: Record<PCStatus, { bg: string; border: string; text: stri
   offline: { bg: "#0d1320", border: "#1a2235", text: "#2a3a55" },
 };
 
-function generatePCs(count: number, alertIdx = -1): { id: string; status: PCStatus }[] {
-  return Array.from({ length: count }, (_, i) => {
-    let status: PCStatus = "idle";
-    if (i === alertIdx) status = "alert";
-    else if (i < 18) {
-      const r = Math.random();
-      status = r < 0.6 ? "active" : r < 0.85 ? "idle" : "offline";
-    } else {
-      status = Math.random() < 0.3 ? "active" : "idle";
-    }
-    return { id: `PC-${String(i + 1).padStart(2, "0")}`, status };
-  });
-}
-
-const attendance = [
-  { name: "John Doe", id: "2024-CS-001", pc: "PC-43", ip: "192.168.1.105", status: "ALERT", color: "#e05c6a" },
-  { name: "Jane Smith", id: "2024-CS-042", pc: "PC-03", ip: "192.168.1.100", status: "ONLINE", color: "#4ac77e" },
-  { name: "Alex Mercado", id: "2024-CS-019", pc: "PC-41", ip: "192.168.1.103", status: "ONLINE", color: "#4ac77e" },
-];
-
 type UsbDevice = {
   vendor_id?: string;
   product_id?: string;
@@ -48,20 +31,47 @@ type UsbDevice = {
   product?: string | null;
 };
 
-const professors: Record<string, { name: string; subject: string; timeRange: string }> = {
-  "08": { name: "Prof. Andy Anciro", subject: "Cybersecurity", timeRange: "09:00 — 12:00" },
-  "09": { name: "Prof. Maria Santos", subject: "Application Dev", timeRange: "10:00 — 13:00" },
-  "10": { name: "Prof. Ramon Cruz", subject: "ICT Fundamentals", timeRange: "08:00 — 11:00" },
-  "11": { name: "Prof. Elena Reyes", subject: "Capstone Research", timeRange: "13:00 — 16:00" },
-};
+type MonitoringPc = { id: string; status: PCStatus };
+
+/** Stable baseline per lab — never recomputed on render. */
+const STATIC_PCS_BY_LAB: Record<ComlabId, MonitoringPc[]> = Object.fromEntries(
+  COMLAB_IDS.map((id) => [id, buildMonitoringPcs(getComlab(id))]),
+) as Record<ComlabId, MonitoringPc[]>;
+
+/** 0-based row indices toggled on manual refresh (deterministic demo). */
+const REFRESH_TOGGLE_INDICES = [4, 11, 22];
 
 export function LabMonitoringPanel() {
+  const { pushToast } = useNotificationContext();
   const api = useElectron();
-  const [activeTab, setActiveTab] = useState("08");
-  const [pcs] = useState(() => generatePCs(30, 0));
+  const { labId, setLabId } = useAdminLab();
+  const [activeTab, setActiveTab] = useState<ComlabId>(labId);
+
+  useEffect(() => {
+    setActiveTab(labId);
+  }, [labId]);
+
+  const labDef = getComlab(activeTab);
+  const [pcsBase, setPcsBase] = useState<MonitoringPc[]>(() => [...STATIC_PCS_BY_LAB[labId]]);
+  const [idleOverrideIds, setIdleOverrideIds] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    setPcsBase([...STATIC_PCS_BY_LAB[activeTab]]);
+    setIdleOverrideIds(new Set());
+  }, [activeTab]);
+
+  const pcs = useMemo(
+    () => pcsBase.map((p) => (idleOverrideIds.has(p.id) ? { ...p, status: "idle" as const } : p)),
+    [pcsBase, idleOverrideIds],
+  );
   const [sessionSecs, setSessionSecs] = useState(96 * 60);
   const [showAlert, setShowAlert] = useState(true);
-  const [expandedPC, setExpandedPC] = useState<string | null>("PC-01");
+  const [expandedPC, setExpandedPC] = useState<string | null>(null);
+
+  useEffect(() => {
+    const alertPc = pcs.find((p) => p.status === "alert");
+    setExpandedPC(alertPc?.id ?? pcs[0]?.id ?? null);
+  }, [pcs]);
   const [usbDevices, setUsbDevices] = useState<UsbDevice[]>([]);
   const [usbError, setUsbError] = useState<string | null>(null);
 
@@ -100,7 +110,12 @@ export function LabMonitoringPanel() {
   const ss = sessionSecs % 60;
   const sessionStr = `${String(Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
 
-  const prof = professors[activeTab];
+  const prof = {
+    name: labDef.professorName,
+    subject: labDef.subject,
+    timeRange: labDef.timeRange,
+  };
+  const attendance = ATTENDANCE_BY_LAB[activeTab];
   const activeCount = pcs.filter((p) => p.status === "active").length;
 
   return (
@@ -111,14 +126,28 @@ export function LabMonitoringPanel() {
         style={{ background: "#0a1020" }}
       >
         <div className="flex items-center gap-3">
-          <span className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: MONO }}>SENTINEL MONITORING</span>
+          <span className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: MONO }}>RUNA · LAB MONITORING</span>
           <div className="flex items-center gap-1.5">
             <div className="w-1.5 h-1.5 rounded-full bg-[#4ac77e]" />
             <span className="text-[#4ac77e] tracking-widest" style={{ fontSize: "8px", fontFamily: MONO }}>SYSTEM SYNCHRONIZED</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button className="w-7 h-7 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5]">
+          <button
+            type="button"
+            className="w-7 h-7 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5]"
+            onClick={() => {
+              setPcsBase((prev) =>
+                prev.map((pc, i) => {
+                  if (!REFRESH_TOGGLE_INDICES.includes(i)) return pc;
+                  if (pc.status !== "active" && pc.status !== "idle") return pc;
+                  return { ...pc, status: pc.status === "active" ? "idle" : "active" };
+                }),
+              );
+              pushToast("Lab monitoring data refreshed", "info");
+            }}
+            title="Refresh lab data"
+          >
             <RefreshCw size={13} />
           </button>
           <span className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
@@ -129,10 +158,14 @@ export function LabMonitoringPanel() {
 
       {/* COMLAB tabs */}
       <div className="flex border-b border-[#1a2640]" style={{ background: "#0f1828" }}>
-        {COMLABS.map((lab) => (
+        {COMLAB_DEFINITIONS.map((lab) => (
           <button
             key={lab.id}
-            onClick={() => setActiveTab(lab.id)}
+            type="button"
+            onClick={() => {
+              setActiveTab(lab.id);
+              setLabId(lab.id);
+            }}
             className="flex items-center gap-2 px-5 py-3 transition-all"
             style={{
               borderBottom: activeTab === lab.id ? "2px solid #3a6fff" : "2px solid transparent",
@@ -140,17 +173,17 @@ export function LabMonitoringPanel() {
             }}
           >
             <span style={{ fontSize: "12px", fontFamily: MONO }}>{lab.label}</span>
-            {lab.incident > 0 && (
+            {lab.incidentCount > 0 && (
               <span
                 className="px-1.5 py-0.5 rounded"
                 style={{ background: "#e05c6a20", color: "#e05c6a", fontSize: "8px", fontFamily: MONO }}
               >
-                {lab.incident} INCIDENT
+                {lab.incidentCount} INCIDENT
               </span>
             )}
-            {lab.incident === 0 && (
+            {lab.incidentCount === 0 && (
               <span style={{ color: "#4ac77e", fontSize: "8px", fontFamily: MONO }}>
-                {lab.health}
+                {lab.healthLabel}
               </span>
             )}
           </button>
@@ -165,7 +198,7 @@ export function LabMonitoringPanel() {
         >
           <div>
             <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Currently Active Session · COMLAB {activeTab}
+              Currently Active Session · {labDef.label}
             </p>
             <p className="text-[#c5d5ea]" style={{ fontSize: "20px" }}>{prof.name}</p>
             <p className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>
@@ -190,14 +223,14 @@ export function LabMonitoringPanel() {
             <span
               className="px-4 py-1.5 rounded"
               style={{
-                background: activeTab === "08" ? "#e05c6a20" : "#4ac77e20",
-                color: activeTab === "08" ? "#e05c6a" : "#4ac77e",
+                background: labDef.incidentCount > 0 ? "#e05c6a20" : "#4ac77e20",
+                color: labDef.incidentCount > 0 ? "#e05c6a" : "#4ac77e",
                 fontSize: "13px",
                 fontFamily: MONO,
-                border: `1px solid ${activeTab === "08" ? "#e05c6a40" : "#4ac77e40"}`,
+                border: `1px solid ${labDef.incidentCount > 0 ? "#e05c6a40" : "#4ac77e40"}`,
               }}
             >
-              {activeTab === "08" ? "ELEVATED" : "NORMAL"}
+              {labDef.healthLabel}
             </span>
           </div>
         </div>
@@ -373,14 +406,19 @@ export function LabMonitoringPanel() {
                 </div>
               ))}
             </div>
-            <p className="text-center text-[#2a3a55] mt-3" style={{ fontSize: "9px", fontFamily: MONO }}>
+            <button
+              type="button"
+              className="block w-full text-center text-[#2a3a55] mt-3 bg-transparent border-0 cursor-pointer hover:text-[#4a6080] transition-colors"
+              style={{ fontSize: "9px", fontFamily: MONO, letterSpacing: "0.12em" }}
+              onClick={() => pushToast("Full attendance view — coming in production build", "info")}
+            >
               VIEW FULL CLASS ({activeCount})
-            </p>
+            </button>
           </div>
         </div>
 
         {/* System Flag Alert */}
-        {activeTab === "08" && showAlert && (
+        {labDef.incidentCount > 0 && showAlert && (
           <div
             className="rounded-xl p-5 border flex items-start gap-5"
             style={{ background: "#1a0d1a", borderColor: "#e05c6a50" }}
@@ -396,14 +434,30 @@ export function LabMonitoringPanel() {
               </p>
               <div className="flex items-center gap-3 mt-3">
                 <button
+                  type="button"
                   className="px-4 py-1.5 rounded text-white transition-colors hover:opacity-90"
                   style={{ background: "#e05c6a", fontSize: "10px", fontFamily: MONO }}
+                  onClick={() => {
+                    pushToast("Terminal session wiped — audit log updated", "warn");
+                    const target =
+                      (expandedPC && pcs.find((p) => p.id === expandedPC)?.status === "alert" && expandedPC) ||
+                      pcs.find((p) => p.status === "alert")?.id ||
+                      null;
+                    if (target) {
+                      setIdleOverrideIds((prev) => new Set(prev).add(target));
+                    }
+                  }}
                 >
                   WIPE TERMINAL
                 </button>
                 <button
+                  type="button"
                   className="px-4 py-1.5 rounded border transition-colors hover:bg-[#1e2e48]"
                   style={{ borderColor: "#2a3a55", color: "#4a6080", fontSize: "10px", fontFamily: MONO }}
+                  onClick={() => {
+                    pushToast("Alert acknowledged and logged", "info");
+                    setShowAlert(false);
+                  }}
                 >
                   IGNORE OVERRIDE
                 </button>

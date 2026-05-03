@@ -5,9 +5,8 @@
  * and admin) parameterized by the `role` prop. Per-mode tools and
  * system prompts come from agentic/toolRegistry.ts.
  *
- * Backend: Day 3 calls the Python sidecar `POST /ai-task` (Bedrock when
- * configured; labeled `local_fallback` otherwise). Keyword stub remains
- * the offline fallback and for `refused` paths.
+ * Backend: Python sidecar `POST /ai-task` when available; keyword fallback
+ * when offline or on error. High-risk paths use proposeAction → HITL queue.
  *
  * Risk classification: every response is classified before it renders.
  * If a response would mutate state (HIGH-risk request from admin),
@@ -17,21 +16,40 @@
  * Cross-reference: sprint/agentic-architecture.md §4.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Send, Bot, User, ShieldAlert } from "lucide-react";
 import type { AgentRole, RiskTier, ToolDefinition } from "../../agentic/types";
 import { getAgentContext, findTool } from "../../agentic/toolRegistry";
-import { classifyAction, explainClassification } from "../../agentic/riskClassifier";
+import { explainClassification } from "../../agentic/riskClassifier";
 import { proposeAction, logAudit } from "../../agentic/approvalQueue";
 import { useElectron } from "../../ipc/useElectron";
+import { useNotificationContext } from "../../providers/NotificationProvider";
 import { RiskBadge } from "./RiskBadge";
+import type { ActionType } from "../../agentic/types";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
 
+export interface ProductivityAssistantHandle {
+  /** Puts text in the composer and focuses it (e.g. workflow starters from the side panel). */
+  setComposerText: (text: string) => void;
+}
+
 interface ProductivityAssistantProps {
   role: AgentRole;
   userId: string;
+  /** Login session expiry (ms epoch) for “time left” answers. */
+  sessionExpiresAt?: number | null;
+  /** Resolved Runa_Folder path on disk (from main). */
+  vaultDisplayPath?: string | null;
   /** Optional fixed-height container; defaults to flex-1 of parent. */
   height?: number | string;
 }
@@ -56,18 +74,12 @@ interface StubResponse {
   text: string;
   toolUsed?: string;
   /** If set, this is a HIGH-risk proposal — route through proposeAction. */
-  proposeActionType?:
-    | "wipe_terminal"
-    | "lock_cluster"
-    | "terminate_session"
-    | "quarantine_usb"
-    | "force_logout"
-    | "enforce_blocklist";
+  proposeActionType?: ActionType;
   refused?: boolean;
 }
 
 const REFUSAL_TEXT_STUDENT =
-  'That request is outside my scope. I can only help with academic explanation, summarization, code review, outlines, and error explanations. Please contact lab staff if you need help with operational tasks.';
+  "That request is outside my scope. I help with coursework support, Runa_Folder file organization, session reminders, and lab FAQs — not admin PC tasks or other users' data. Contact lab tech for operational issues.";
 
 const REFUSAL_TEXT_ADMIN =
   'I cannot execute that action directly. I can summarize, recommend, draft, or propose actions for HITL review. State-mutating actions must go through the Approvals Queue.';
@@ -90,6 +102,23 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
   }
 
   if (role === "student") {
+    if (
+      /complete (my )?(entire )?(assignment|homework|exam)|take my exam|answer (all|every) (the )?(questions|items)|write my whole (essay|paper|thesis)/i.test(
+        p,
+      )
+    ) {
+      return {
+        text: "I cannot complete graded exams, entire assignments, or impersonate your work. I can explain concepts, review a short passage you wrote, suggest structure, or help debug errors. Ask lab staff if you need accommodations.",
+        toolUsed: "integrity_guardrail",
+        refused: true,
+      };
+    }
+    if (/send (this |my |an )?email|submit (to )?(canvas|moodle|blackboard|lms)|upload (my )?(assignment|work) to/i.test(p)) {
+      return {
+        text: "Sending email or submitting to an external system is not done automatically. I will queue this for lab staff review (human-in-the-loop). You can still copy text yourself and submit manually.",
+        proposeActionType: "student_hitl_escalation",
+      };
+    }
     if (/explain.*(big[\s-]?o|complexity|algorithm)/.test(p))
       return {
         text:
@@ -99,31 +128,31 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
     if (/explain|what is|define/.test(p))
       return {
         text:
-          "Here's a plain explanation: I'm a stub backend right now, so I'm pattern-matching your prompt to one of my five tools. Day 3 of the sprint replaces me with a real Bedrock-backed Claude call that can answer this properly. For now: try asking about Big-O, summarizing a passage, reviewing code, or outlining an essay.",
+          "Here is a concise explanation (offline fallback): break the idea into definition, one example, and one common pitfall. When the lab assistant service is online, you will get a fuller answer. Try pasting a specific paragraph or error if you have one.",
         toolUsed: "explain_concept",
       };
     if (/summari[sz]e|tldr|tl;dr/.test(p))
       return {
         text:
-          "Stub summary: I'd compress your passage into a 3-sentence summary preserving the key claims. (Real LLM call lands on Day 3.)",
+          "Offline fallback: paste the passage here. I would compress it to three sentences keeping the main claims. Use the assistant service when online for a tailored summary.",
         toolUsed: "summarize_text",
       };
     if (/review|check|critique|feedback/.test(p))
       return {
         text:
-          "Stub code review: I'd comment on correctness and readability of the snippet you paste. Most common issues I'd flag: unhandled error paths, missing null checks, off-by-one bounds, mutating shared state. (Real review lands on Day 3.)",
+          "Offline fallback: paste the code. I would check correctness, readability, null handling, and bounds. When online, the sidecar can give line-level comments.",
         toolUsed: "code_review",
       };
     if (/outline|essay|paper/.test(p))
       return {
         text:
-          "Stub outline:\n  I. Introduction — context, thesis\n     A. Hook\n     B. Background\n  II. Body\n     A. Argument 1\n     B. Argument 2\n  III. Conclusion — recap, implication\n(Real outline generation lands on Day 3.)",
+          "Offline outline template:\n  I. Introduction — context, thesis\n     A. Hook\n     B. Background\n  II. Body — arguments with evidence\n  III. Conclusion — recap and implication\nPaste your topic when online for a tighter outline.",
         toolUsed: "generate_outline",
       };
     if (/error|exception|stack trace|undefined/.test(p))
       return {
         text:
-          "Stub error explanation: paste the exact error message and a few lines of context, and I'd identify the cause and suggest one concrete fix. (Real diagnosis lands on Day 3.)",
+          "Offline fallback: paste the exact error text and a few lines of surrounding code. I would trace the likely cause and one fix. When online, the sidecar can go deeper.",
         toolUsed: "explain_error",
       };
     return {
@@ -185,7 +214,7 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
   if (/draft.*(policy|blocklist)/.test(p))
     return {
       text:
-        "Stub draft: I would produce a copy-pasteable policy entry, e.g. `enforced_blocklist += { domain: 'example.com', reason: '...', added_by: <admin>, added_at: <now> }`. Apply via Settings → Web Governance.",
+        "Stub draft: I would produce a copy-pasteable policy entry, e.g. `enforced_blocklist += { domain: 'example.com', reason: '...', added_by: <admin>, added_at: <now> }`. Apply via the admin Access / governance workflow when enabled.",
       toolUsed: "draft_policy",
     };
   return {
@@ -200,25 +229,78 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
 // ─────────────────────────────────────────────
 type AiTaskBody = { ok?: boolean; response?: string; source?: string; detail?: string };
 
-export function ProductivityAssistant({ role, userId, height }: ProductivityAssistantProps) {
+export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, ProductivityAssistantProps>(
+  function ProductivityAssistant({ role, userId, sessionExpiresAt, vaultDisplayPath, height }, ref) {
   const ctx = useMemo(() => getAgentContext(role, userId), [role, userId]);
   const electron = useElectron();
+  const { pushToast } = useNotificationContext();
+  const reminderTimers = useRef<number[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const buildWelcomeText = useCallback((vaultPath: string | null | undefined) => {
+    const ac = getAgentContext(role, userId);
+    const toolList = ac.availableTools.map((t) => t.label).join(", ");
+    if (role === "student") {
+      const vaultLine =
+        vaultPath && vaultPath.trim().length > 0
+          ? ` Runa_Folder path: ${vaultPath.length > 88 ? `${vaultPath.slice(0, 40)}…${vaultPath.slice(-40)}` : vaultPath}.`
+          : "";
+      return `Welcome. I am Runa — your lab assistant. I help with coursework, Runa_Folder (beside Runa when packaged), session reminders, and lab FAQs.${vaultLine} Tools: ${toolList}. Add program launchers with + on the left rail. The right panel shows automation governance: approvals, your audit trace, and workflow starters. Programs always open in Windows.`;
+    }
+    return `Operational assistant ready. Available tools: ${toolList}. HIGH-risk proposals route through the Approvals Queue.`;
+  }, [role, userId]);
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
       from: "assistant",
-      text:
-        role === "student"
-          ? `Welcome. I'm a bounded academic assistant. Available tools: ${ctx.availableTools.map((t) => t.label).join(", ")}. What can I help you with?`
-          : `Operational assistant ready. Available tools: ${ctx.availableTools.map((t) => t.label).join(", ")}. HIGH-risk proposals route through the Approvals Queue.`,
+      text: buildWelcomeText(undefined),
       ts: Date.now(),
       riskTier: "low",
     },
   ]);
+
+  useEffect(() => {
+    setMessages((prev) => {
+      const i = prev.findIndex((m) => m.id === "welcome");
+      if (i === -1) return prev;
+      const nextText = buildWelcomeText(vaultDisplayPath);
+      if (prev[i].text === nextText) return prev;
+      const copy = [...prev];
+      copy[i] = { ...prev[i], text: nextText };
+      return copy;
+    });
+  }, [vaultDisplayPath, buildWelcomeText]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      setComposerText: (text: string) => {
+        setInput(text);
+        queueMicrotask(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
+          const len = text.length;
+          try {
+            el.setSelectionRange(len, len);
+          } catch {
+            /* ignore */
+          }
+        });
+      },
+    }),
+    [],
+  );
+
+  useEffect(() => {
+    return () => {
+      reminderTimers.current.forEach((tid) => window.clearTimeout(tid));
+    };
+  }, []);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -250,17 +332,121 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       riskTier: "low",
     });
 
+    let handled = false;
+    let assistantText = "";
+    let toolUsed: string | undefined;
+    let refused = false;
+
+    if (role === "student") {
+      void electron.telemetry.record("student_chat_send", { length: text.length });
+
+      const rem = text.match(/remind me (?:to (.+?) )?in (\d+)\s*minutes?/i);
+      if (rem) {
+        const minutes = Math.min(120, Math.max(1, parseInt(rem[2], 10)));
+        const what = (rem[1] ?? "your reminder").trim().slice(0, 120) || "your reminder";
+        const tid = window.setTimeout(() => {
+          pushToast(`Reminder: ${what}`, "info");
+          void logAudit({
+            eventType: "student_reminder_fired",
+            detail: JSON.stringify({ what, minutes }),
+            actorUserId: userId,
+            actorRole: "student",
+            riskTier: "low",
+          });
+        }, minutes * 60 * 1000);
+        reminderTimers.current.push(tid);
+        assistantText = `In-app reminder set for ${minutes} minute(s): “${what}”. Reminders only fire while this window stays open; they do not extend official lab attendance.`;
+        toolUsed = "session_lab_help";
+        handled = true;
+        void electron.telemetry.record("reminder_scheduled", { minutes });
+      }
+
+      if (
+        !handled &&
+        /how much time|time (do i |left)|(session|login).{0,12}(left|remain|expire)|remaining.{0,16}session/i.test(
+          text,
+        )
+      ) {
+        if (sessionExpiresAt != null && sessionExpiresAt > Date.now()) {
+          const mins = Math.max(0, Math.floor((sessionExpiresAt - Date.now()) / 60000));
+          assistantText = `About ${mins} minute(s) remain before your Runa login session expires (${new Date(sessionExpiresAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}). Lab closing and attendance rules come from staff — this timer is only your app sign-in.`;
+        } else {
+          assistantText =
+            "I do not have your session expiry in this view. Ask lab staff for lab hours and attendance.";
+        }
+        toolUsed = "session_lab_help";
+        handled = true;
+      }
+
+      if (!handled && /(create|make) (a |an |the )?folder|mkdir|new folder/i.test(text)) {
+        const nameMatch =
+          text.match(/(?:named|called)\s*["']?([^"'\n]+?)["']?\s*$/i) ||
+          text.match(/folder\s+["']?([^"'\n]+)["']?/i) ||
+          text.match(/mkdir\s+["']?([^"'\n]+)["']?/i);
+        const folderName =
+          (nameMatch?.[1] ?? "New folder").trim().replace(/[<>:"/\\|?*]/g, "_").slice(0, 80) || "New folder";
+        const relBase = await electron.runaFiles.getSessionWorkspaceRelative();
+        if (!relBase.ok || !relBase.relative) {
+          assistantText = relBase.error ?? "You must be signed in to use Runa_Folder.";
+          toolUsed = "runa_files_help";
+        } else {
+          const relativePath = `${String(relBase.relative).replace(/\\/g, "/")}/${folderName}`;
+          const cr = await electron.runaFiles.createFolder(relativePath);
+          if (cr.ok) {
+            assistantText = `Created folder in your Runa vault:\n${relativePath}\n(Under Runa_Folder next to the app when installed — scoped to your session; not visible to other lab accounts.)`;
+            toolUsed = "runa_files_help";
+          } else {
+            assistantText = `Could not create folder: ${cr.error ?? "Unknown error"}. If this persists, contact lab tech.`;
+            toolUsed = "runa_files_help";
+          }
+        }
+        handled = true;
+      }
+    }
+
+    if (handled) {
+      const tierFromRegistry: RiskTier =
+        toolUsed && findTool(role, toolUsed)
+          ? (findTool(role, toolUsed) as ToolDefinition).riskTier
+          : "low";
+      setMessages((m) => [
+        ...m,
+        {
+          id: `a-${Date.now()}`,
+          from: "assistant",
+          text: assistantText,
+          ts: Date.now(),
+          riskTier: refused ? "low" : tierFromRegistry,
+          toolUsed,
+          refused,
+        },
+      ]);
+      await logAudit({
+        eventType: refused ? "request_refused" : "chat_response",
+        detail: JSON.stringify({ tool: toolUsed ?? null, path: "student_local_handler" }),
+        actorUserId: userId,
+        actorRole: "student",
+        riskTier: refused ? "low" : tierFromRegistry,
+      });
+      setBusy(false);
+      return;
+    }
+
     const stub = stubRespond(text, role);
 
     if (stub.proposeActionType) {
+      const isStudentEscalation = stub.proposeActionType === "student_hitl_escalation";
       const proposeRes = await proposeAction(
         {
           type: stub.proposeActionType,
-          scope: "lab",
-          reversible: false,
-          payload: { source: "admin_assistant", prompt: text },
+          scope: role === "admin" ? "lab" : "self",
+          reversible: isStudentEscalation,
+          payload: {
+            source: role === "admin" ? "admin_assistant" : "student_assistant",
+            prompt: text.slice(0, 500),
+          },
           confidence: 0.85,
-          reasoning: `Admin assistant proposing ${stub.proposeActionType} based on user prompt: "${text.slice(0, 80)}"`,
+          reasoning: `${role} assistant proposing ${stub.proposeActionType} from prompt: "${text.slice(0, 80)}"`,
         },
         userId,
         role,
@@ -298,9 +484,9 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       return;
     }
 
-    let assistantText = stub.text;
-    let toolUsed: string | undefined = stub.toolUsed;
-    let refused = stub.refused;
+    assistantText = stub.text;
+    toolUsed = stub.toolUsed;
+    refused = Boolean(stub.refused);
     let sidecarSource: string | undefined;
 
     if (!refused) {
@@ -325,30 +511,20 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       } else if (!py.ok) {
         assistantText =
           stub.text +
-          `\n\n_(Python sidecar unavailable${py.error ? `: ${py.error}` : ""} — keyword fallback.)_`;
+          `\n\nThe assistant service is offline or unreachable${py.error ? ` (${py.error})` : ""}. Please try again when the lab network is available. If this keeps happening, contact lab tech.`;
       }
     }
 
-    // Non-HITL response path: classify, log, render.
     const responseAction = {
-      type: refused ? "chat_response" : (toolUsed ?? "chat_response"),
+      type: "chat_response" as const,
       scope: "self" as const,
       reversible: true,
       payload: { responseLength: assistantText.length },
       reasoning: refused
-        ? "Out-of-scope request refused per role's tool whitelist"
+        ? "Out-of-scope request refused per policy"
         : `Assistant tool: ${toolUsed ?? "chat_response"}`,
     };
-    const tier: RiskTier = classifyAction({
-      ...responseAction,
-      type: toolUsed && findTool(role, toolUsed)?.riskTier
-        ? toolUsed
-        : "chat_response",
-    } as never) ?? "low";
 
-    // The toolUsed id may not be in RISK_RULES (e.g. 'summarize_text' is
-    // a tool id, not an action type). Fall back to looking up the tier
-    // directly from the registry.
     const tierFromRegistry: RiskTier =
       toolUsed && findTool(role, toolUsed)
         ? (findTool(role, toolUsed) as ToolDefinition).riskTier
@@ -356,8 +532,8 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
     const finalTier = refused ? "low" : tierFromRegistry;
 
     const reason = refused
-      ? "Out-of-scope request — refused per role's tool whitelist"
-      : explainClassification({ ...responseAction, type: "chat_response" });
+      ? "Out-of-scope request — refused per policy"
+      : explainClassification(responseAction);
 
     setMessages((m) => [
       ...m,
@@ -372,11 +548,14 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       },
     ]);
 
+    const auditActor = role === "student" ? userId : "system";
+    const auditRole = role === "student" ? "student" : "agent";
+
     await logAudit({
       eventType: refused ? "request_refused" : "chat_response",
       detail: JSON.stringify({ tool: toolUsed ?? null, reason, sidecarSource }),
-      actorUserId: "system",
-      actorRole: "agent",
+      actorUserId: auditActor,
+      actorRole: auditRole,
       riskTier: finalTier,
     });
 
@@ -384,15 +563,12 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       await logAudit({
         eventType: "tool_invoked",
         detail: JSON.stringify({ tool: toolUsed, sidecarSource }),
-        actorUserId: "system",
-        actorRole: "agent",
+        actorUserId: auditActor,
+        actorRole: auditRole,
         riskTier: finalTier,
       });
     }
 
-    // Suppress unused-tier warning while keeping the variable for
-    // possible future divergence between renderer and registry tiers.
-    void tier;
     setBusy(false);
   };
 
@@ -446,7 +622,7 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
           <ShieldAlert size={11} className="mt-0.5 shrink-0 text-[#a06820]" />
           <p style={{ lineHeight: 1.4 }}>
             {role === "student"
-              ? "I do not access your files or network. I only respond to messages you send in this chat. Tools available: "
+              ? "Safe file automation only under Runa_Folder (your session subfolder). No admin PC changes, no other users' files, no silent email/submit. In-app reminders only. Tools: "
               : "I summarize, recommend, and draft. I do not directly execute state-mutating actions; HIGH-risk proposals route through the Approvals Queue. Tools available: "}
             <span className="text-[#7eb5f5]">
               {ctx.availableTools.map((t) => t.label).join(" · ")}
@@ -544,12 +720,13 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
         style={{ background: "#0d1626" }}
       >
         <textarea
+          ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={
             role === "student"
-              ? "Ask about a concept, paste code for review, request an outline..."
+              ? "Ask a concept, paste code, “create folder …”, “remind me in 10 minutes”, session time…"
               : "Summarize today's audit, explain an alert, propose an action..."
           }
           rows={2}
@@ -578,4 +755,6 @@ export function ProductivityAssistant({ role, userId, height }: ProductivityAssi
       </div>
     </div>
   );
-}
+});
+
+ProductivityAssistant.displayName = "ProductivityAssistant";

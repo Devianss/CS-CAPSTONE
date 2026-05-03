@@ -12,7 +12,13 @@ import path from "path";
 import { spawn, ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 const Store = require("electron-store");
-import fs from "fs";
+import fsSync from "fs";
+import {
+  ensureVaultExists,
+  resolveUnderVault,
+  sessionRelativeFolder,
+  MAX_TEXT_FILE_BYTES,
+} from "./runaFiles";
 
 // ─────────────────────────────────────────────
 //  Types (mirror src/app/agentic/types.ts — main stays self-contained)
@@ -29,6 +35,10 @@ type ActionType =
   | "recommend_action"
   | "draft_policy"
   | "mark_notification"
+  | "runa_create_folder"
+  | "runa_write_file"
+  | "runa_move_within_vault"
+  | "student_hitl_escalation"
   | "wipe_terminal"
   | "lock_cluster"
   | "terminate_session"
@@ -91,6 +101,13 @@ interface AuditRow {
   confidenceScore?: number;
 }
 
+/** User-added OS shortcuts (.exe / .lnk); not pre-seeded by app defaults. */
+interface LabShortcutRow {
+  id: string;
+  label: string;
+  targetPath: string;
+}
+
 interface StoreSchema {
   session: {
     userId: string;
@@ -104,6 +121,8 @@ interface StoreSchema {
     theme: "dark" | "light";
     notifications: boolean;
   };
+  /** Dynamic list of lab / IDE shortcuts (add via UI). */
+  labShortcuts: LabShortcutRow[];
   auditLog: AuditRow[];
   approvalsQueue: ApprovalRequest[];
 }
@@ -123,7 +142,7 @@ const PYTHON_BASE_URL = `http://127.0.0.1:${PYTHON_PORT}`;
 // __dirname after compile is dist-electron/electron/, so we walk up
 // two levels to reach the repo root before descending into src/.
 const ICON_PATH = path.join(__dirname, "..", "..", "src", "imports", "image.png");
-const HAS_ICON = fs.existsSync(ICON_PATH);
+const HAS_ICON = fsSync.existsSync(ICON_PATH);
 
 // ─────────────────────────────────────────────
 //  Persistent store (electron-store)
@@ -136,11 +155,61 @@ const store = new Store({
       theme: "dark",
       notifications: true,
     },
+    labShortcuts: [] as LabShortcutRow[],
     auditLog: [] as AuditRow[],
     approvalsQueue: [] as ApprovalRequest[],
   },
 });
 
+function readLabShortcuts(): LabShortcutRow[] {
+  const raw = store.get("labShortcuts") as unknown;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (r): r is LabShortcutRow =>
+      Boolean(r) &&
+      typeof (r as LabShortcutRow).id === "string" &&
+      typeof (r as LabShortcutRow).label === "string" &&
+      typeof (r as LabShortcutRow).targetPath === "string",
+  );
+}
+
+/** One-time migration from legacy `labAppShortcuts` record → `labShortcuts` list. */
+function migrateLabShortcuts(): void {
+  let rows = readLabShortcuts();
+  const bag = store.store as Record<string, unknown>;
+  const legacy = bag.labAppShortcuts as Record<string, string> | undefined;
+  if (
+    rows.length === 0 &&
+    legacy &&
+    typeof legacy === "object" &&
+    Object.keys(legacy).length > 0
+  ) {
+    const labels: Record<string, string> = {
+      vscode: "VS Code",
+      intellij: "IntelliJ IDEA",
+      netbeans: "NetBeans",
+      blender: "Blender",
+      inkscape: "Inkscape",
+      chrome: "Google Chrome",
+      terminal: "Terminal",
+      explorer: "File Explorer",
+    };
+    rows = Object.entries(legacy).map(([key, targetPath]) => ({
+      id: randomUUID(),
+      label: labels[key] ?? key,
+      targetPath: String(targetPath).trim(),
+    }));
+    store.set("labShortcuts", rows);
+  }
+  if (!Array.isArray(store.get("labShortcuts"))) {
+    store.set("labShortcuts", rows);
+  }
+  if ("labAppShortcuts" in bag) {
+    (store as unknown as { delete: (key: string) => void }).delete("labAppShortcuts");
+  }
+}
+
+/** Rolling in-app audit row cap. Export / archive for thesis retention policy as needed. */
 const AUDIT_LIMIT = 500;
 const QUEUE_LIMIT = 100;
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -153,6 +222,10 @@ const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   recommend_action: "medium",
   draft_policy: "medium",
   mark_notification: "medium",
+  runa_create_folder: "low",
+  runa_write_file: "low",
+  runa_move_within_vault: "low",
+  student_hitl_escalation: "high",
   wipe_terminal: "high",
   lock_cluster: "high",
   terminate_session: "high",
@@ -217,6 +290,61 @@ function findRequest(id: string): ApprovalRequest | undefined {
 
 function executeAction(action: AgentAction): { ok: boolean; message: string } {
   console.log("[main] executeAction", action.type, JSON.stringify(action.payload));
+
+  if (action.type === "runa_create_folder") {
+    const rel = String(action.payload.relativePath ?? "").trim();
+    const resolved = resolveUnderVault(app, rel);
+    if (!resolved.ok) return { ok: false, message: resolved.error };
+    try {
+      fsSync.mkdirSync(resolved.absolute, { recursive: true });
+      return { ok: true, message: `Created folder under Runa_Folder: ${rel || "."}` };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  if (action.type === "runa_write_file") {
+    const rel = String(action.payload.relativePath ?? "").trim();
+    const content = String(action.payload.content ?? "");
+    const buf = Buffer.from(content, "utf8");
+    if (buf.length > MAX_TEXT_FILE_BYTES) {
+      return { ok: false, message: `File exceeds maximum size (${MAX_TEXT_FILE_BYTES} bytes).` };
+    }
+    const resolved = resolveUnderVault(app, rel);
+    if (!resolved.ok) return { ok: false, message: resolved.error };
+    try {
+      fsSync.mkdirSync(path.dirname(resolved.absolute), { recursive: true });
+      fsSync.writeFileSync(resolved.absolute, buf, { encoding: "utf8" });
+      return { ok: true, message: `Wrote file under Runa_Folder: ${rel}` };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  if (action.type === "runa_move_within_vault") {
+    const fromRel = String(action.payload.fromRelative ?? "").trim();
+    const toRel = String(action.payload.toRelative ?? "").trim();
+    const a = resolveUnderVault(app, fromRel);
+    const b = resolveUnderVault(app, toRel);
+    if (!a.ok) return { ok: false, message: a.error };
+    if (!b.ok) return { ok: false, message: b.error };
+    try {
+      fsSync.mkdirSync(path.dirname(b.absolute), { recursive: true });
+      fsSync.renameSync(a.absolute, b.absolute);
+      return { ok: true, message: `Moved within Runa_Folder: ${fromRel} → ${toRel}` };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  if (action.type === "student_hitl_escalation") {
+    return {
+      ok: true,
+      message:
+        "Request recorded. Lab staff will follow up — Runa cannot send email, submit coursework, or change policies autonomously.",
+    };
+  }
+
   return { ok: true, message: `Stub executed: ${action.type} (demo)` };
 }
 
@@ -243,7 +371,7 @@ function startPythonService(): void {
     if (isPacked) {
       cmd = serviceExe;
       args = [];
-    } else if (!fs.existsSync(scriptPath)) {
+    } else if (!fsSync.existsSync(scriptPath)) {
       console.warn(`[main] Python service script not found at ${scriptPath} — sidecar disabled.`);
       return;
     } else {
@@ -294,8 +422,8 @@ function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
-    minWidth: 1024,
-    minHeight: 680,
+    minWidth: 1280,
+    minHeight: 800,
     title: "PCU Lab Portal",
     backgroundColor: "#0d1320",
     // Hide the default frame so we can use a custom titlebar
@@ -389,6 +517,8 @@ function createTray(): Tray | null {
 //  IPC handlers
 // ─────────────────────────────────────────────
 function registerIpcHandlers(): void {
+  migrateLabShortcuts();
+
   // ── Session management ──────────────────────
   ipcMain.handle("session:get", () => store.get("session"));
 
@@ -466,6 +596,322 @@ function registerIpcHandlers(): void {
     });
     return result.canceled ? null : result.filePaths[0];
   });
+
+  // ── Student lab shortcuts (dynamic list — add/remove in UI) ─────────────────
+  ipcMain.handle("lab:get-shortcuts", () => [...readLabShortcuts()]);
+
+  ipcMain.handle(
+    "lab:add-shortcut",
+    (_event, payload: { label: string; targetPath: string }) => {
+      const session = store.get("session");
+      const settings = store.get("settings");
+      const list = readLabShortcuts();
+
+      if (settings.kioskMode && session?.role === "student") {
+        logEvent({
+          eventType: "lab_shortcut_edit_denied",
+          detail: JSON.stringify({ reason: "kiosk_student_readonly", op: "add" }),
+          actorUserId: session?.userId ?? "unknown",
+          actorRole: "student",
+          riskTier: "low",
+        });
+        return {
+          ok: false as const,
+          shortcuts: list,
+          error:
+            "Kiosk mode: shortcuts are managed by IT. Contact lab tech to add or change applications.",
+        };
+      }
+
+      const label = String(payload?.label ?? "").trim().slice(0, 80);
+      const targetPath = String(payload?.targetPath ?? "").trim();
+      if (!label || !targetPath) {
+        return {
+          ok: false as const,
+          shortcuts: list,
+          error: "Enter a display name and choose an executable or shortcut file.",
+        };
+      }
+
+      const item: LabShortcutRow = { id: randomUUID(), label, targetPath };
+      const next = [...list, item];
+      store.set("labShortcuts", next);
+      logEvent({
+        eventType: "lab_shortcut_added",
+        detail: JSON.stringify({ id: item.id, label: item.label }),
+        actorUserId: session?.userId ?? "system",
+        actorRole: session?.role ?? "system",
+        riskTier: "low",
+      });
+      return { ok: true as const, shortcuts: next, item };
+    },
+  );
+
+  ipcMain.handle(
+    "lab:update-shortcut",
+    (_event, payload: { id: string; label: string; targetPath: string }) => {
+      const session = store.get("session");
+      const settings = store.get("settings");
+      const list = readLabShortcuts();
+
+      if (settings.kioskMode && session?.role === "student") {
+        logEvent({
+          eventType: "lab_shortcut_edit_denied",
+          detail: JSON.stringify({ id: payload.id, reason: "kiosk_student_readonly", op: "update" }),
+          actorUserId: session?.userId ?? "unknown",
+          actorRole: "student",
+          riskTier: "low",
+        });
+        return {
+          ok: false as const,
+          shortcuts: list,
+          error:
+            "Kiosk mode: shortcuts are managed by IT. Contact lab tech to change applications.",
+        };
+      }
+
+      const id = String(payload?.id ?? "").trim();
+      const idx = list.findIndex((r) => r.id === id);
+      if (idx === -1) {
+        return {
+          ok: false as const,
+          shortcuts: list,
+          error: "Shortcut not found.",
+        };
+      }
+
+      const label = String(payload?.label ?? "").trim().slice(0, 80);
+      const targetPath = String(payload?.targetPath ?? "").trim();
+      if (!label || !targetPath) {
+        return {
+          ok: false as const,
+          shortcuts: list,
+          error: "Display name and target path are required.",
+        };
+      }
+
+      const next = [...list];
+      next[idx] = { ...list[idx], label, targetPath };
+      store.set("labShortcuts", next);
+      logEvent({
+        eventType: "lab_shortcut_updated",
+        detail: JSON.stringify({ id, label }),
+        actorUserId: session?.userId ?? "system",
+        actorRole: session?.role ?? "system",
+        riskTier: "low",
+      });
+      return { ok: true as const, shortcuts: next, item: next[idx] };
+    },
+  );
+
+  ipcMain.handle("lab:remove-shortcut", (_event, id: string) => {
+    const session = store.get("session");
+    const settings = store.get("settings");
+    const list = readLabShortcuts();
+
+    if (settings.kioskMode && session?.role === "student") {
+      logEvent({
+        eventType: "lab_shortcut_edit_denied",
+        detail: JSON.stringify({ id, reason: "kiosk_student_readonly", op: "remove" }),
+        actorUserId: session?.userId ?? "unknown",
+        actorRole: "student",
+        riskTier: "low",
+      });
+      return {
+        ok: false as const,
+        shortcuts: list,
+        error:
+          "Kiosk mode: shortcuts are managed by IT. Contact lab tech to remove an entry.",
+      };
+    }
+
+    const next = list.filter((r) => r.id !== id);
+    store.set("labShortcuts", next);
+    logEvent({
+      eventType: "lab_shortcut_removed",
+      detail: JSON.stringify({ id }),
+      actorUserId: session?.userId ?? "system",
+      actorRole: session?.role ?? "system",
+      riskTier: "low",
+    });
+    return { ok: true as const, shortcuts: next };
+  });
+
+  ipcMain.handle("lab:launch", async (_event, id: string) => {
+    const session = store.get("session");
+    const row = readLabShortcuts().find((r) => r.id === id);
+    const p = row?.targetPath?.trim();
+    if (!p) {
+      logEvent({
+        eventType: "lab_app_launch",
+        detail: JSON.stringify({ id, ok: false, reason: "not_found" }),
+        actorUserId: session?.userId ?? "unknown",
+        actorRole: session?.role ?? "system",
+        riskTier: "low",
+      });
+      return {
+        ok: false,
+        error:
+          "That shortcut is missing. Add it from the side panel (Add shortcut), or ask lab tech in kiosk labs.",
+      };
+    }
+    try {
+      const err = await shell.openPath(p);
+      logEvent({
+        eventType: "lab_app_launch",
+        detail: JSON.stringify({ id, label: row?.label, ok: !err, pathTail: p.slice(-64) }),
+        actorUserId: session?.userId ?? "unknown",
+        actorRole: session?.role ?? "system",
+        riskTier: "low",
+      });
+      if (err) return { ok: false, error: err };
+      return { ok: true as const };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logEvent({
+        eventType: "lab_app_launch",
+        detail: JSON.stringify({ id, ok: false, error: msg }),
+        actorUserId: session?.userId ?? "unknown",
+        actorRole: session?.role ?? "system",
+        riskTier: "low",
+      });
+      return { ok: false, error: msg };
+    }
+  });
+
+  // ── Runa_Folder vault (student-safe automation root) ───────────────────────
+  ipcMain.handle("runaFiles:getVaultRoot", () => {
+    try {
+      const root = ensureVaultExists(app);
+      return { ok: true as const, path: root };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : String(e),
+        path: null as string | null,
+      };
+    }
+  });
+
+  ipcMain.handle("runaFiles:getSessionWorkspaceRelative", () => {
+    const session = store.get("session");
+    if (!session?.userId) {
+      return { ok: false as const, error: "Not signed in.", relative: null as string | null };
+    }
+    return {
+      ok: true as const,
+      relative: sessionRelativeFolder(session.userId),
+    };
+  });
+
+  ipcMain.handle("runaFiles:createFolder", (_e, relativePath: string) => {
+    const session = store.get("session");
+    if (!session?.userId) {
+      return { ok: false as const, error: "Not signed in." };
+    }
+    const resolved = resolveUnderVault(app, relativePath);
+    if (!resolved.ok) {
+      return { ok: false as const, error: resolved.error };
+    }
+    try {
+      fsSync.mkdirSync(resolved.absolute, { recursive: true });
+      logEvent({
+        eventType: "runa_files_mkdir",
+        detail: JSON.stringify({ relativePath }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return { ok: true as const, absolute: resolved.absolute };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logEvent({
+        eventType: "runa_files_error",
+        detail: JSON.stringify({ op: "mkdir", relativePath, error: msg }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return { ok: false as const, error: msg };
+    }
+  });
+
+  ipcMain.handle("runaFiles:writeTextFile", (_e, relativePath: string, content: string) => {
+    const session = store.get("session");
+    if (!session?.userId) {
+      return { ok: false as const, error: "Not signed in." };
+    }
+    const buf = Buffer.from(String(content ?? ""), "utf8");
+    if (buf.length > MAX_TEXT_FILE_BYTES) {
+      return { ok: false as const, error: `File too large (max ${MAX_TEXT_FILE_BYTES} bytes).` };
+    }
+    const resolved = resolveUnderVault(app, relativePath);
+    if (!resolved.ok) {
+      return { ok: false as const, error: resolved.error };
+    }
+    try {
+      fsSync.mkdirSync(path.dirname(resolved.absolute), { recursive: true });
+      fsSync.writeFileSync(resolved.absolute, buf, { encoding: "utf8" });
+      logEvent({
+        eventType: "runa_files_write",
+        detail: JSON.stringify({ relativePath, bytes: buf.length }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return { ok: true as const, absolute: resolved.absolute };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logEvent({
+        eventType: "runa_files_error",
+        detail: JSON.stringify({ op: "write", relativePath, error: msg }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return { ok: false as const, error: msg };
+    }
+  });
+
+  ipcMain.handle("runaFiles:listDir", (_e, relativePath: string) => {
+    const session = store.get("session");
+    if (!session?.userId) {
+      return { ok: false as const, error: "Not signed in.", entries: [] as string[] };
+    }
+    const resolved = resolveUnderVault(app, relativePath);
+    if (!resolved.ok) {
+      return { ok: false as const, error: resolved.error, entries: [] as string[] };
+    }
+    try {
+      const names = fsSync.readdirSync(resolved.absolute);
+      logEvent({
+        eventType: "runa_files_list",
+        detail: JSON.stringify({ relativePath, count: names.length }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return { ok: true as const, entries: names };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false as const, error: msg, entries: [] as string[] };
+    }
+  });
+
+  ipcMain.handle(
+    "telemetry:record",
+    (_e, event: string, meta?: Record<string, unknown>) => {
+      const session = store.get("session");
+      logEvent({
+        eventType: "feature_usage",
+        detail: JSON.stringify({ event, meta: meta ?? {} }),
+        actorUserId: session?.userId ?? "anonymous",
+        actorRole: session?.role ?? "system",
+        riskTier: "low",
+      });
+      return true;
+    },
+  );
 
   // ── Notifications ───────────────────────────
   ipcMain.handle("tray:notify", (_event, title: string, body: string) => {
@@ -706,6 +1152,11 @@ function registerIpcHandlers(): void {
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
   registerIpcHandlers();
+  try {
+    ensureVaultExists(app);
+  } catch (e) {
+    console.error("[main] Runa_Folder vault init:", e);
+  }
   startPythonService();
   mainWindow = createMainWindow();
   tray = createTray();

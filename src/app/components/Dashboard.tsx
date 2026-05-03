@@ -2,11 +2,9 @@ import { useState, useEffect, useCallback, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import {
   Shield,
-  Settings,
   Wifi,
   User,
-  Volume2,
-  LayoutDashboard,
+  LayoutGrid,
   Activity,
   ShieldCheck,
   FileText,
@@ -14,14 +12,9 @@ import {
   Inbox,
   AlertTriangle,
 } from "lucide-react";
-import { SettingsPanel } from "./SettingsPanel";
-import {
-  NotificationBell,
-  NotificationPanel,
-  ToastContainer,
-  useNotifications,
-} from "./NotificationPanel";
-import { LabDashboardPanel } from "./LabDashboardPanel";
+import { NotificationsMenu } from "../providers/NotificationProvider";
+import { AdminCommandCenter } from "./AdminCommandCenter";
+import { AdminLabProvider } from "../context/AdminLabContext";
 import { LabMonitoringPanel } from "./LabMonitoringPanel";
 import { AccessControlPanel } from "./AccessControlPanel";
 import { AuditTrailsPanel } from "./AuditTrailsPanel";
@@ -47,7 +40,7 @@ type NavItem = {
 const navItems = (
   pending: number,
 ): NavItem[] => [
-  { id: "lab-dashboard", label: "DASHBOARD", icon: <LayoutDashboard size={20} /> },
+  { id: "command-center", label: "COMMAND", icon: <LayoutGrid size={20} /> },
   { id: "lab-monitoring", label: "MONITORING", icon: <Activity size={20} /> },
   { id: "access-control", label: "ACCESS", icon: <ShieldCheck size={20} /> },
   { id: "audit-trails", label: "AUDIT", icon: <FileText size={20} /> },
@@ -64,10 +57,14 @@ function AdminContent({
   active,
   adminId,
   onApprovalsChange,
+  onNavigate,
+  pendingCount,
 }: {
   active: string;
   adminId: string;
   onApprovalsChange?: () => void;
+  onNavigate: (id: string) => void;
+  pendingCount: number;
 }) {
   switch (active) {
     case "assistant":
@@ -88,34 +85,21 @@ function AdminContent({
       return <AccessControlPanel />;
     case "audit-trails":
       return <AuditTrailsPanel />;
-    case "lab-dashboard":
+    case "command-center":
     default:
-      return <LabDashboardPanel />;
+      return <AdminCommandCenter onNavigate={onNavigate} pendingCount={pendingCount} />;
   }
 }
 
 export function Dashboard() {
   const navigate = useNavigate();
   const api = useElectron();
-  const [activeNav, setActiveNav] = useState("lab-dashboard");
+  const [activeNav, setActiveNav] = useState("command-center");
   const [now, setNow] = useState(new Date());
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [adminId, setAdminId] = useState("");
   const [adminDisplayName, setAdminDisplayName] = useState("System Administrator");
   const [pendingCount, setPendingCount] = useState(0);
-  const {
-    notifications,
-    toast,
-    showPanel,
-    setShowPanel,
-    markRead,
-    markAllRead,
-    dismiss,
-    clearAll,
-    dismissToast,
-  } = useNotifications();
-
   const refreshPending = useCallback(async () => {
     try {
       const p = await listPending();
@@ -173,10 +157,8 @@ export function Dashboard() {
   };
 
   return (
+    <AdminLabProvider>
     <div className="flex flex-col h-full min-h-0" style={{ background: "#0d1320", fontFamily: GROTESK }}>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-      <ToastContainer toast={toast} onDismiss={dismissToast} />
-
       <header
         className="flex items-center justify-between px-5 h-14 border-b border-[#1a2640] shrink-0"
         style={{ background: "#0f1828" }}
@@ -217,7 +199,7 @@ export function Dashboard() {
 
             {showUserMenu && (
               <div
-                className="absolute top-full right-0 mt-2 rounded-sm border border-[#2a3a55] overflow-hidden z-50"
+                className="absolute top-full right-0 mt-2 rounded-sm border border-[#2a3a55] overflow-hidden z-[var(--z-popover)]"
                 style={{ background: "#111d30", minWidth: "160px" }}
               >
                 <div className="px-4 py-3 border-b border-[#1a2640]">
@@ -240,27 +222,8 @@ export function Dashboard() {
             )}
           </div>
 
-          <div className="relative">
-            <NotificationBell notifications={notifications} onOpen={() => setShowPanel((v) => !v)} />
-            {showPanel && (
-              <NotificationPanel
-                notifications={notifications}
-                onClose={() => setShowPanel(false)}
-                onMarkRead={markRead}
-                onMarkAllRead={markAllRead}
-                onDismiss={dismiss}
-                onClearAll={clearAll}
-              />
-            )}
-          </div>
+          <NotificationsMenu />
 
-          <button
-            className="w-8 h-8 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5] transition-colors"
-            title="Settings"
-            onClick={() => setShowSettings(true)}
-          >
-            <Settings size={16} />
-          </button>
         </div>
       </header>
 
@@ -309,6 +272,8 @@ export function Dashboard() {
                 active={activeNav}
                 adminId={adminId || "admin@runa.edu.ph"}
                 onApprovalsChange={refreshPending}
+                onNavigate={setActiveNav}
+                pendingCount={pendingCount}
               />
             </div>
 
@@ -437,7 +402,17 @@ export function Dashboard() {
         className="flex items-center justify-between px-5 h-11 border-t border-[#1a2640] shrink-0"
         style={{ background: "#0f1828" }}
       >
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-3 min-w-0">
+          <div
+            className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-md border shrink-0"
+            style={{ background: "#162035", borderColor: "#2a3a55" }}
+          >
+            <Shield size={11} className="text-[#4ac77e]" />
+            <span className="text-[#4ac77e] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
+              System Protection Active
+            </span>
+          </div>
+          <div className="flex items-center gap-1 min-w-0">
           {items.map((item) => (
             <button
               key={item.id}
@@ -465,6 +440,7 @@ export function Dashboard() {
               )}
             </button>
           ))}
+          </div>
         </div>
 
         <div className="flex items-center gap-4">
@@ -472,13 +448,6 @@ export function Dashboard() {
             <Shield size={11} />
             <span className="tracking-widest uppercase">ADMIN</span>
           </div>
-          <button
-            className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors"
-            onClick={() => setShowSettings(true)}
-            title="Settings"
-          >
-            <Volume2 size={14} />
-          </button>
           <div className="text-[#4a6080] text-right tabular-nums" style={{ fontSize: "10px", fontFamily: MONO }}>
             <div>{timeStr}</div>
             <div style={{ fontSize: "9px" }}>{dateStr}</div>
@@ -486,5 +455,6 @@ export function Dashboard() {
         </div>
       </footer>
     </div>
+    </AdminLabProvider>
   );
 }

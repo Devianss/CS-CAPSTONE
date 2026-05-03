@@ -28,11 +28,15 @@ export type ActionType =
   | "audit_query"
   | "view_policy"
   | "health_check"
+  | "runa_create_folder"
+  | "runa_write_file"
+  | "runa_move_within_vault"
   // MEDIUM
   | "recommend_action"
   | "draft_policy"
   | "mark_notification"
   // HIGH
+  | "student_hitl_escalation"
   | "wipe_terminal"
   | "lock_cluster"
   | "terminate_session"

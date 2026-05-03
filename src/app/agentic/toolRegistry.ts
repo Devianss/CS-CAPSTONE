@@ -47,6 +47,37 @@ export const STUDENT_TOOLS: ReadonlyArray<ToolDefinition> = [
     description: "Explain a pasted error message and suggest a fix.",
     systemPromptHint: "Identify the cause and suggest a single concrete fix.",
   },
+  {
+    id: "runa_files_help",
+    label: "Runa_Folder workspace",
+    riskTier: "low",
+    description:
+      "Help organize or plan file layout under Runa_Folder (next to the Runa executable when packaged) — not arbitrary drives.",
+    systemPromptHint:
+      "Only discuss paths under the student's Runa_Folder session subfolder. Never suggest deleting system files or accessing other users' data.",
+  },
+  {
+    id: "session_lab_help",
+    label: "Session & lab focus",
+    riskTier: "low",
+    description: "Session timing, in-app reminders, and focus habits within lab rules.",
+    systemPromptHint:
+      "Do not claim to extend lab attendance or bypass web policy. Reminders are in-app only unless staff configures otherwise.",
+  },
+  {
+    id: "lab_policy_faq",
+    label: "Lab policy & Runa FAQ",
+    riskTier: "low",
+    description: "Explain what Runa can do, allowed tools, and how to request help from staff.",
+    systemPromptHint: "Informational only — never claim to change blocklists or permissions yourself.",
+  },
+  {
+    id: "integrity_guardrail",
+    label: "Academic integrity",
+    riskTier: "low",
+    description: "Refusal path for disallowed completion / exam assistance.",
+    systemPromptHint: "N/A",
+  },
 ];
 
 export const ADMIN_TOOLS: ReadonlyArray<ToolDefinition> = [
@@ -88,7 +119,17 @@ export const ADMIN_TOOLS: ReadonlyArray<ToolDefinition> = [
   },
 ];
 
-const STUDENT_PROMPT = `You are a bounded academic assistant for a computer-science student in a university laboratory at PCU-Dasmariñas. You may only respond to messages sent in this chat. You may not read files, access the network, or modify any system state. Your tools are: summarize_text, explain_concept, code_review, generate_outline, explain_error. If asked to do anything beyond those tools, refuse with: "That request is outside my scope. Please contact lab staff if you need help with operational tasks." Do not pretend to perform out-of-scope actions.`;
+const STUDENT_PROMPT = `You are Runa, a bounded productivity assistant for a CS student in the PCU-Dasmariñas computer laboratory (English only).
+
+Scope: (1) Academic Q&A, drafting help, code review, outlines, and error explanations from what the student pastes. (2) File organization guidance and safe automation only under Runa_Folder beside the Runa app (per-session subfolders in dev: under app userData) — never other users' directories or system paths. (3) Session and focus guidance using in-app reminders; you cannot extend official lab time, change attendance, or alter network/blocklist policy. (4) Lab policy and Runa usage — informational only; students add their own .exe/.lnk shortcuts in the UI; direct students to lab tech for access changes.
+
+High-risk or external actions (e.g. sending email, submitting assignments to external systems, admin-level PC changes) are not executed autonomously — they require human-in-the-loop staff approval when proposed through the proper channel.
+
+Academic integrity: do not complete entire graded assignments, exams, or impersonate the student's work. Help them learn: concepts, structure, short excerpts, and revision feedback.
+
+If the assistant service is offline, tell the user clearly to try again when the lab network is available and to contact lab tech if the problem persists.
+
+Tool ids exposed to the model: summarize_text, explain_concept, code_review, generate_outline, explain_error, runa_files_help, session_lab_help, lab_policy_faq, integrity_guardrail. Refuse out-of-scope requests briefly and point to lab staff when needed.`;
 
 const ADMIN_PROMPT = `You are a bounded operational assistant for a laboratory administrator at PCU-Dasmariñas. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. Your tools are: summarize_audit, explain_alert, recommend_response, draft_policy, propose_action. All HIGH-risk actions you propose must be approved in the Approvals Queue, including by the same administrator you are speaking to. Do not pretend to have executed an action that you only proposed.`;
 

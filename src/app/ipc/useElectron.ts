@@ -37,6 +37,39 @@ const browserStubs: ElectronAPI = {
   dialog: {
     openFile: async () => null,
   },
+  lab: {
+    getShortcuts: async () => [],
+    addShortcut: async () => ({
+      ok: false as const,
+      shortcuts: [],
+      error: "Not in Electron",
+    }),
+    updateShortcut: async () => ({
+      ok: false as const,
+      shortcuts: [],
+      error: "Not in Electron",
+    }),
+    removeShortcut: async () => ({
+      ok: false as const,
+      shortcuts: [],
+      error: "Not in Electron",
+    }),
+    launch: async () => ({ ok: false, error: "Not in Electron" }),
+  },
+  runaFiles: {
+    getVaultRoot: async () => ({ ok: false, path: null, error: "Not in Electron" }),
+    getSessionWorkspaceRelative: async () => ({
+      ok: false,
+      relative: null,
+      error: "Not in Electron",
+    }),
+    createFolder: async () => ({ ok: false, error: "Not in Electron" }),
+    writeTextFile: async () => ({ ok: false, error: "Not in Electron" }),
+    listDir: async () => ({ ok: false, entries: [], error: "Not in Electron" }),
+  },
+  telemetry: {
+    record: async () => true,
+  },
   tray: {
     notify: noop,
   },

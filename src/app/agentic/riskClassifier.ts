@@ -24,6 +24,9 @@ export const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   audit_query: "low",
   view_policy: "low",
   health_check: "low",
+  runa_create_folder: "low",
+  runa_write_file: "low",
+  runa_move_within_vault: "low",
 
   // MEDIUM — mutates non-critical state OR provides a recommendation
   recommend_action: "medium",
@@ -31,6 +34,7 @@ export const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   mark_notification: "medium",
 
   // HIGH — mutates critical state, irreversible, or affects multiple users
+  student_hitl_escalation: "high",
   wipe_terminal: "high",
   lock_cluster: "high",
   terminate_session: "high",

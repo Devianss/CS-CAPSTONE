@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
+import { useNotificationContext } from "../providers/NotificationProvider";
 import { useElectron } from "../ipc/useElectron";
+import { useAdminLab } from "../context/AdminLabContext";
+import { COMLAB_DEFINITIONS, getComlab } from "../data/comlabs";
 import {
   Download,
   Filter,
@@ -15,7 +18,7 @@ import {
 const MONO = "'Space Mono', monospace";
 const GROTESK = "'Space Grotesk', sans-serif";
 
-const COMLABS = ["COMLAB 8", "COMLAB 9", "COMLAB 10", "COMLAB 11"];
+const AUDIT_LAB_KEYS = COMLAB_DEFINITIONS.map((c) => c.auditLogKey);
 
 type SecurityEvent =
   | { type: "scan"; label: string; color: string }
@@ -30,6 +33,8 @@ interface StationLog {
   studentId: string;
   inTime: string;
   outTime: string | null;
+  /** Session calendar date (YYYY-MM-DD) for institutional date filter */
+  date: string;
   event: SecurityEvent;
 }
 
@@ -42,6 +47,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202110299",
       inTime: "13:00:14",
       outTime: null,
+      date: "2026-04-21",
       event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
     },
     {
@@ -51,6 +57,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202211548",
       inTime: "13:05:00",
       outTime: "14:30:22",
+      date: "2026-04-22",
       event: { type: "blocked", label: "File Blocked", color: "#e05c6a" },
     },
     {
@@ -60,6 +67,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202116056",
       inTime: "13:12:45",
       outTime: null,
+      date: "2026-04-21",
       event: { type: "monitoring", label: "Active Monitoring", color: "#4a6fa5" },
     },
     {
@@ -69,6 +77,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202318892",
       inTime: "13:15:20",
       outTime: null,
+      date: "2026-04-22",
       event: { type: "identity", label: "Identity Verified", color: "#4a6fa5" },
     },
     {
@@ -78,6 +87,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202209871",
       inTime: "12:58:44",
       outTime: "14:02:11",
+      date: "2026-04-21",
       event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
     },
     {
@@ -87,6 +97,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202315540",
       inTime: "13:21:08",
       outTime: null,
+      date: "2026-04-22",
       event: { type: "monitoring", label: "Active Monitoring", color: "#4a6fa5" },
     },
   ],
@@ -98,6 +109,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202210034",
       inTime: "10:02:19",
       outTime: null,
+      date: "2026-04-21",
       event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
     },
     {
@@ -107,6 +119,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202117782",
       inTime: "10:05:55",
       outTime: null,
+      date: "2026-04-22",
       event: { type: "identity", label: "Identity Verified", color: "#4a6fa5" },
     },
   ],
@@ -118,6 +131,7 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202318001",
       inTime: "08:01:44",
       outTime: "10:55:30",
+      date: "2026-04-21",
       event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
     },
   ],
@@ -129,24 +143,22 @@ const logsPerLab: Record<string, StationLog[]> = {
       studentId: "202215678",
       inTime: "13:00:00",
       outTime: null,
+      date: "2026-04-22",
       event: { type: "blocked", label: "File Blocked", color: "#e05c6a" },
     },
   ],
 };
 
-const capacities: Record<string, { current: number; total: number }> = {
-  "COMLAB 8": { current: 24, total: 40 },
-  "COMLAB 9": { current: 18, total: 40 },
-  "COMLAB 10": { current: 12, total: 40 },
-  "COMLAB 11": { current: 6, total: 40 },
-};
+const capacities: Record<string, { current: number; total: number }> = Object.fromEntries(
+  COMLAB_DEFINITIONS.map((c) => [
+    c.auditLogKey,
+    { current: Math.round((c.utilizationPercent / 100) * 40), total: 40 },
+  ]),
+);
 
-const sessions: Record<string, { subject: string; prof: string }> = {
-  "COMLAB 8": { subject: "Data Structures & Algorithms", prof: "Engr. Arturo Dela Cruz" },
-  "COMLAB 9": { subject: "Application Development", prof: "Prof. Maria Santos" },
-  "COMLAB 10": { subject: "ICT Fundamentals", prof: "Prof. Ramon Cruz" },
-  "COMLAB 11": { subject: "Capstone Research", prof: "Prof. Elena Reyes" },
-};
+const sessions: Record<string, { subject: string; prof: string }> = Object.fromEntries(
+  COMLAB_DEFINITIONS.map((c) => [c.auditLogKey, { subject: c.subject, prof: c.professorName }]),
+);
 
 function EventBadge({ event }: { event: SecurityEvent }) {
   const icons: Record<string, React.ReactNode> = {
@@ -186,17 +198,21 @@ interface RunaAuditRow {
   approvalId?: string;
 }
 
+const PAGE_SIZE = 10;
+
 export function AuditTrailsPanel() {
+  const { pushToast } = useNotificationContext();
   const electron = useElectron();
+  const { labId, setLabId } = useAdminLab();
   const [surface, setSurface] = useState<AuditSurface>("hardware");
   const [runaRows, setRunaRows] = useState<RunaAuditRow[]>([]);
-  const [activeTab, setActiveTab] = useState("COMLAB 8");
+  const [activeTab, setActiveTab] = useState(COMLAB_DEFINITIONS[0].auditLogKey);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom, setDateFrom] = useState("2026-04-21");
   const [dateTo, setDateTo] = useState("2026-04-21");
-  const ROWS_PER_PAGE = 4;
+  const [lockedStations, setLockedStations] = useState<Set<string>>(() => new Set());
 
   const refreshRuna = useCallback(async () => {
     try {
@@ -212,22 +228,37 @@ export function AuditTrailsPanel() {
     void refreshRuna();
   }, [surface, refreshRuna]);
 
+  useEffect(() => {
+    setActiveTab(getComlab(labId).auditLogKey);
+  }, [labId]);
+
   const logs = logsPerLab[activeTab] ?? [];
-  const filtered = logs.filter(
-    (l) =>
+  const filtered = logs.filter((l) => {
+    const matchesSearch =
       l.student.toLowerCase().includes(search.toLowerCase()) ||
       l.station.toLowerCase().includes(search.toLowerCase()) ||
-      l.studentId.includes(search)
-  );
-  const totalPages = Math.ceil(filtered.length / ROWS_PER_PAGE);
-  const paged = filtered.slice((page - 1) * ROWS_PER_PAGE, page * ROWS_PER_PAGE);
+      l.studentId.includes(search);
+
+    const matchesDate = (() => {
+      if (!dateFrom && !dateTo) return true;
+      const rowDate = l.date;
+      if (!rowDate) return true;
+      if (dateFrom && rowDate < dateFrom) return false;
+      if (dateTo && rowDate > dateTo) return false;
+      return true;
+    })();
+
+    return matchesSearch && matchesDate;
+  });
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const cap = capacities[activeTab];
   const sess = sessions[activeTab];
   const securityFlags = logs.filter((l) => l.event.type === "blocked").length;
 
   return (
     <div className="h-full overflow-y-auto" style={{ background: "#0d1320", fontFamily: GROTESK }}>
-      <div className="sticky top-0 z-10 flex gap-2 px-4 py-2 border-b border-[#1a2640]" style={{ background: "#0a1020" }}>
+      <div className="sticky top-0 z-[var(--z-banner)] flex gap-2 px-4 py-2 border-b border-[#1a2640]" style={{ background: "#0a1020" }}>
         <button
           type="button"
           onClick={() => setSurface("hardware")}
@@ -345,10 +376,16 @@ export function AuditTrailsPanel() {
 
         {/* Tabs */}
         <div className="flex items-center gap-6 mt-5">
-          {COMLABS.map((lab) => (
+          {AUDIT_LAB_KEYS.map((lab) => (
             <button
               key={lab}
-              onClick={() => { setActiveTab(lab); setPage(1); }}
+              type="button"
+              onClick={() => {
+                setActiveTab(lab);
+                setPage(1);
+                const d = COMLAB_DEFINITIONS.find((c) => c.auditLogKey === lab);
+                if (d) setLabId(d.id);
+              }}
               className="transition-all pb-1"
               style={{
                 color: activeTab === lab ? "#c5d5ea" : "#4a6080",
@@ -401,7 +438,11 @@ export function AuditTrailsPanel() {
               />
             </div>
             <button
-              onClick={() => setPage(1)}
+              type="button"
+              onClick={() => {
+                setPage(1);
+                setShowDateFilter(false);
+              }}
               className="mt-6 px-4 py-1.5 rounded-md border transition-colors hover:bg-[#3a6fff]"
               style={{ borderColor: "#3a6fff", color: "#7eb5f5", fontSize: "10px", fontFamily: MONO }}
             >
@@ -480,7 +521,7 @@ export function AuditTrailsPanel() {
         {/* Right: Logs table */}
         <div>
           <div
-            className="rounded-xl border overflow-hidden"
+            className="rounded-xl border overflow-x-auto overflow-y-hidden"
             style={{ background: "#111d30", borderColor: "#1e2e48" }}
           >
             {/* Table header */}
@@ -559,7 +600,9 @@ export function AuditTrailsPanel() {
               paged.map((log) => (
                 <div
                   key={log.id}
-                  className="grid items-center px-5 py-4 border-b border-[#1a2640] hover:bg-[#162035] transition-colors group"
+                  className={`grid items-center px-5 py-4 border-b border-[#1a2640] hover:bg-[#162035] transition-colors group ${
+                    lockedStations.has(log.station) ? "opacity-50" : ""
+                  }`}
                   style={{ gridTemplateColumns: "110px 1fr 100px 130px 90px" }}
                 >
                   {/* Station */}
@@ -593,18 +636,24 @@ export function AuditTrailsPanel() {
                   {/* Actions */}
                   <div className="flex items-center gap-2">
                     <button
+                      type="button"
                       className="px-2 py-1 rounded text-[#e05c6a] border border-[#e05c6a30] hover:bg-[#e05c6a20] transition-colors"
                       style={{ fontSize: "8px", fontFamily: MONO }}
+                      onClick={() => {
+                        let locking = false;
+                        setLockedStations((prev) => {
+                          const next = new Set(prev);
+                          locking = !next.has(log.station);
+                          if (next.has(log.station)) next.delete(log.station);
+                          else next.add(log.station);
+                          return next;
+                        });
+                        if (locking) pushToast(`Station ${log.station} locked`, "warn");
+                      }}
                     >
                       LOCK
                     </button>
-                    <button
-                      className="px-2 py-1 rounded text-[#4a6080] border border-[#2a3a55] hover:bg-[#1e2e48] transition-colors"
-                      style={{ fontSize: "8px", fontFamily: MONO }}
-                    >
-                      AUDIT
-                    </button>
-                    <button className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors ml-1">
+                    <button type="button" className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors ml-1">
                       <MoreVertical size={13} />
                     </button>
                   </div>
@@ -615,26 +664,44 @@ export function AuditTrailsPanel() {
             {/* Pagination */}
             <div className="flex items-center justify-between px-5 py-3">
               <span style={{ color: "#4a6080", fontSize: "10px", fontFamily: MONO }}>
-                Showing {Math.min(ROWS_PER_PAGE, filtered.length)} / {filtered.length} active sessions
+                Showing {filtered.length === 0 ? 0 : Math.min(PAGE_SIZE, paged.length)} of {filtered.length} rows
               </span>
-              <div className="flex items-center gap-2">
-                <span style={{ color: "#4a6080", fontSize: "10px", fontFamily: MONO }}>PREV</span>
-                {Array.from({ length: Math.max(1, totalPages) }, (_, i) => i + 1).map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setPage(p)}
-                    className="w-6 h-6 rounded flex items-center justify-center transition-colors"
-                    style={{
-                      background: page === p ? "#3a6fff" : "transparent",
-                      color: page === p ? "white" : "#4a6080",
-                      fontSize: "10px",
-                      fontFamily: MONO,
-                    }}
-                  >
-                    {String(p).padStart(2, "0")}
-                  </button>
-                ))}
-                <span style={{ color: "#4a6080", fontSize: "10px", fontFamily: MONO }}>NEXT</span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  style={{
+                    color: page === 1 ? "#2a3a55" : "#7eb5f5",
+                    fontSize: 10,
+                    fontFamily: MONO,
+                    background: "none",
+                    border: "none",
+                    cursor: page === 1 ? "not-allowed" : "pointer",
+                    padding: "0 4px",
+                  }}
+                >
+                  PREV
+                </button>
+                <span style={{ color: "#4a6080", fontSize: "10px", fontFamily: MONO }}>
+                  {page} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  style={{
+                    color: page === totalPages ? "#2a3a55" : "#7eb5f5",
+                    fontSize: 10,
+                    fontFamily: MONO,
+                    background: "none",
+                    border: "none",
+                    cursor: page === totalPages ? "not-allowed" : "pointer",
+                    padding: "0 4px",
+                  }}
+                >
+                  NEXT
+                </button>
               </div>
             </div>
           </div>

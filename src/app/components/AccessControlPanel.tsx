@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Lock, Power, Shield, AlertTriangle, Activity, ChevronRight, X, FileSearch } from "lucide-react";
 import { toast } from "sonner";
 import { useElectron } from "../ipc/useElectron";
 import { logAudit, proposeAction } from "../agentic/approvalQueue";
+import { useAdminLab } from "../context/AdminLabContext";
+import { buildAccessNodes, COMLAB_DEFINITIONS, getComlab } from "../data/comlabs";
 
 const MONO = "'Space Mono', monospace";
 const GROTESK = "'Space Grotesk', sans-serif";
@@ -16,17 +18,6 @@ const NODE_STYLE: Record<NodeStatus, { bg: string; border: string; dot: string }
   blocked:  { bg: "#2a1810", border: "#e8821a", dot: "#e8821a" },
   scanning: { bg: "#101e30", border: "#4ac77e", dot: "#4ac77e" },
 };
-
-function genNodes(count: number): { id: string; status: NodeStatus; label: string }[] {
-  const statuses: NodeStatus[] = ["normal","normal","normal","normal","alert","blocked","offline","scanning","normal","normal"];
-  return Array.from({ length: count }, (_, i) => ({
-    id: `N-${String(i + 1).padStart(3, "0")}`,
-    label: `STA-${String(i + 1).padStart(2, "0")}-C${Math.floor(i / 10) + 8}`,
-    status: statuses[i % statuses.length],
-  }));
-}
-
-const nodes = genNodes(40);
 
 const realTimeLogs = [
   { time: "14:22:11", msg: "STA-03 authenticated (STD-001)", level: "info" },
@@ -46,11 +37,16 @@ const levelStyle: Record<string, { color: string; prefix: string }> = {
 
 export function AccessControlPanel() {
   const api = useElectron();
+  const { labId, setLabId } = useAdminLab();
+  const nodes = useMemo(() => buildAccessNodes(getComlab(labId)), [labId]);
+  const sessionNodes = useMemo(
+    () => nodes.filter((n) => n.status === "normal" || n.status === "scanning").length,
+    [nodes],
+  );
   const [lockConfirm, setLockConfirm] = useState(false);
   const [terminateConfirm, setTerminateConfirm] = useState(false);
   const [locked, setLocked] = useState(false);
   const [terminated, setTerminated] = useState(false);
-  const [sessionNodes] = useState(() => 18);
   const [logs, setLogs] = useState(realTimeLogs);
   const [actorId, setActorId] = useState("");
   const [fileScanBusy, setFileScanBusy] = useState(false);
@@ -172,24 +168,25 @@ export function AccessControlPanel() {
           ACCESS GOVERNANCE
         </h1>
         <div className="flex items-center gap-6 mt-2">
-          {[
-            { label: "COMLAB 8", active: true },
-            { label: "COMLAB 9", active: false },
-            { label: "COMLAB 10", active: false },
-            { label: "COMLAB 11", active: false },
-          ].map((tab) => (
+          {COMLAB_DEFINITIONS.map((lab) => (
             <button
-              key={tab.label}
+              key={lab.id}
+              type="button"
+              onClick={() => setLabId(lab.id)}
               className="transition-colors"
               style={{
-                color: tab.active ? "#7eb5f5" : "#2a3a55",
+                color: labId === lab.id ? "#7eb5f5" : "#2a3a55",
                 fontSize: "10px",
                 fontFamily: MONO,
-                borderBottom: tab.active ? "1px solid #3a6fff" : "1px solid transparent",
+                borderBottom: labId === lab.id ? "1px solid #3a6fff" : "1px solid transparent",
                 paddingBottom: "2px",
+                background: labId === lab.id ? "#162035" : "transparent",
+                border: labId === lab.id ? "1px solid rgba(58,111,255,0.35)" : "1px solid transparent",
+                borderRadius: "4px",
+                padding: "4px 8px",
               }}
             >
-              {tab.label}
+              {lab.label}
             </button>
           ))}
         </div>
@@ -202,7 +199,9 @@ export function AccessControlPanel() {
             <div className="flex items-center justify-between mb-5">
               <div className="flex items-center gap-2">
                 <Activity size={14} className="text-[#3a6fff]" />
-                <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>Node Matrix</span>
+                <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>
+                  {getComlab(labId).label} — Node Matrix
+                </span>
               </div>
               <div className="flex items-center gap-4">
                 {(["normal","alert","blocked","offline"] as NodeStatus[]).map((s) => (
@@ -219,7 +218,7 @@ export function AccessControlPanel() {
                 const sty = NODE_STYLE[node.status];
                 return (
                   <div
-                    key={node.id}
+                    key={`${labId}-${node.id}`}
                     className="rounded-lg p-2 flex flex-col items-center gap-1.5 cursor-pointer hover:brightness-125 transition-all group"
                     style={{ background: sty.bg, border: `1px solid ${sty.border}` }}
                     title={`${node.label} · ${node.status.toUpperCase()}`}
@@ -257,7 +256,7 @@ export function AccessControlPanel() {
                 <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>Active Nodes</p>
                 <div className="flex items-end gap-2">
                   <span className="text-[#c5d5ea]" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>{sessionNodes}</span>
-                  <span className="text-[#2a3a55] mb-1" style={{ fontSize: "14px", fontFamily: MONO }}>/30</span>
+                  <span className="text-[#2a3a55] mb-1" style={{ fontSize: "14px", fontFamily: MONO }}>/{nodes.length}</span>
                 </div>
                 <div className="mt-3 h-1 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
                   <div className="h-full rounded-full" style={{ width: `${(sessionNodes / 30) * 100}%`, background: "#3a6fff" }} />
@@ -316,7 +315,7 @@ export function AccessControlPanel() {
                 <Lock size={14} style={{ color: locked ? "#4ac77e" : "#4a6080" }} />
               </div>
               <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
-                {locked ? "Cluster locked · AES-256 secured" : "Freeze all nodes in COMLAB 08"}
+                {locked ? "Cluster locked · AES-256 secured" : `Freeze all nodes in ${getComlab(labId).label}`}
               </p>
               {locked && (
                 <p className="text-[#4ac77e] mt-1" style={{ fontSize: "8px", fontFamily: MONO }}>● ACTIVE</p>
@@ -453,14 +452,14 @@ export function AccessControlPanel() {
 
       {/* Lock Confirm Modal */}
       {lockConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
+        <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
           <div className="rounded-xl p-6 border shadow-2xl" style={{ background: "#111d30", borderColor: "#2a3a55", width: "340px" }}>
             <div className="flex items-center gap-2 mb-3">
               <Lock size={16} className="text-[#4a6fa5]" />
               <span className="text-[#c5d5ea]" style={{ fontSize: "14px" }}>Confirm Cluster Lock</span>
             </div>
             <p className="text-[#4a6080] mb-5" style={{ fontSize: "11px", fontFamily: MONO }}>
-              This will freeze all active nodes in COMLAB 08. Students will be unable to interact with terminals until unlocked.
+              {`This will freeze all active nodes in ${getComlab(labId).label}. Students will be unable to interact with terminals until unlocked.`}
             </p>
             <div className="flex gap-3">
               <button
@@ -484,7 +483,7 @@ export function AccessControlPanel() {
 
       {/* Terminate Confirm Modal */}
       {terminateConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
+        <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
           <div className="rounded-xl p-6 border shadow-2xl" style={{ background: "#1a0d18", borderColor: "#e05c6a50", width: "340px" }}>
             <div className="flex items-center gap-2 mb-3">
               <Power size={16} className="text-[#e05c6a]" />

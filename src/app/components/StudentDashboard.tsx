@@ -1,152 +1,334 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router";
 import {
   Shield,
-  Settings,
-  Wifi,
-  Code2,
-  Globe,
   Monitor,
-  FolderOpen,
   User,
-  Volume2,
-  Bot,
+  Sparkles,
+  AppWindow,
+  Plus,
+  Trash2,
+  Pencil,
 } from "lucide-react";
-import { SettingsPanel } from "./SettingsPanel";
-import {
-  VSCodeWindow,
-  IntelliJWindow,
-  ChromeWindow,
-  TerminalWindow,
-  ProjectsWindow,
-} from "./AppWindows";
-import {
-  NotificationBell,
-  NotificationPanel,
-  ToastContainer,
-  useNotifications,
-} from "./NotificationPanel";
-import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
+import { NotificationsMenu } from "../providers/NotificationProvider";
+import { useNotificationContext } from "../providers/NotificationProvider";
+import { ProductivityAssistant, type ProductivityAssistantHandle } from "./agentic/ProductivityAssistant";
+import { StudentRpaSidePanel } from "./student/rpaSidePanel/StudentRpaSidePanel";
 import { useElectron } from "../ipc/useElectron";
 import { findDemoUser } from "../auth/demoUsers";
+import type { ElectronLabShortcut } from "../../types/electron";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
 const BRAND = "'Orbitron', sans-serif";
 
-function formatTime(secs: number) {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-type AppItem = { id: string; label: string; icon: React.ReactNode };
-
-const apps: AppItem[] = [
-  { id: "assistant", label: "ASSISTANT", icon: <Bot size={22} /> },
-  { id: "vscode",    label: "VS CODE",  icon: <Code2 size={22} /> },
-  {
-    id: "intellij",
-    label: "INTELLIJ",
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="14" rx="2" />
-        <line x1="7" y1="8" x2="11" y2="8" />
-        <line x1="7" y1="12" x2="13" y2="12" />
-      </svg>
-    ),
-  },
-  { id: "chrome",   label: "CHROME",   icon: <Globe size={22} className="text-[#e8821a]" /> },
-  { id: "terminal", label: "TERMINAL", icon: <Monitor size={22} /> },
-  { id: "projects", label: "PROJECTS", icon: <FolderOpen size={22} /> },
+const SHORTCUT_PICK_FILTERS = [
+  { name: "Program or shortcut", extensions: ["exe", "lnk"] },
+  { name: "All files", extensions: ["*"] },
 ];
 
-function AppContent({ activeApp, studentId }: { activeApp: string; studentId: string }) {
-  switch (activeApp) {
-    case "assistant":
-      return (
-        <div className="h-full min-h-0 p-4 box-border">
-          <ProductivityAssistant role="student" userId={studentId} height="100%" />
-        </div>
-      );
-    case "vscode":    return <VSCodeWindow />;
-    case "intellij":  return <IntelliJWindow />;
-    case "chrome":    return <ChromeWindow />;
-    case "terminal":  return <TerminalWindow />;
-    case "projects":
-    default:          return <ProjectsWindow />;
-  }
+/** Suggested display names only — user still picks the real .exe / .lnk on disk. */
+const SHORTCUT_NAME_SUGGESTIONS = [
+  "VS Code",
+  "IntelliJ IDEA",
+  "NetBeans",
+  "Google Chrome",
+  "Terminal",
+  "File Explorer",
+  "Blender",
+  "Inkscape",
+] as const;
+
+const STUDENT_TOUR_STORAGE_KEY = "runa.studentTour.v1";
+
+function pathTail(p: string, max = 40): string {
+  const t = p.trim();
+  if (t.length <= max) return t;
+  return `…${t.slice(-(max - 1))}`;
+}
+
+/** Remaining time until Runa login session expiry (wall clock `nowMs`). */
+function formatSessionRemaining(expiresAt: number | null, nowMs: number): string {
+  if (expiresAt == null || expiresAt <= nowMs) return "—";
+  const mins = Math.ceil((expiresAt - nowMs) / 60_000);
+  if (mins <= 0) return "—";
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
 }
 
 export function StudentDashboard() {
   const navigate = useNavigate();
   const api = useElectron();
+  const { pushToast } = useNotificationContext();
   const [secondsUsed, setSecondsUsed] = useState(0);
-  const [activeApp, setActiveApp] = useState("vscode");
   const [studentId, setStudentId] = useState("");
   const [studentDisplayName, setStudentDisplayName] = useState("Student");
   const [now, setNow] = useState(new Date());
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const {
-    notifications, toast, showPanel, setShowPanel,
-    markRead, markAllRead, dismiss, clearAll, dismissToast,
-  } = useNotifications();
+  const [kioskMode, setKioskMode] = useState<boolean | null>(null);
+  /** Kiosk / locked-down labs: only IT may change the shortcut list. */
+  const canEditShortcuts = kioskMode !== true;
+  const [shortcutsList, setShortcutsList] = useState<ElectronLabShortcut[]>([]);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null);
+  const [showStudentTour, setShowStudentTour] = useState(false);
+  const [vaultPath, setVaultPath] = useState<string | null>(null);
+  const [draftLabel, setDraftLabel] = useState("");
+  const [draftPath, setDraftPath] = useState("");
+  const [shortcutMenu, setShortcutMenu] = useState<{
+    x: number;
+    y: number;
+    entry: ElectronLabShortcut;
+  } | null>(null);
+  const shortcutMenuRef = useRef<HTMLDivElement>(null);
+  const [editTarget, setEditTarget] = useState<ElectronLabShortcut | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [editPath, setEditPath] = useState("");
+  const [showCreateShortcutModal, setShowCreateShortcutModal] = useState(false);
+  const assistantRef = useRef<ProductivityAssistantHandle>(null);
+
+  const refreshShortcuts = useCallback(async () => {
+    const list = await api.lab.getShortcuts();
+    setShortcutsList(Array.isArray(list) ? list : []);
+  }, [api]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setSecondsUsed((s) => s + 1);
+      setSecondsUsed((x) => x + 1);
       setNow(new Date());
     }, 1000);
     return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+    void (async () => {
       const s = await api.session.get();
-      if (s?.userId) {
+      if (!cancelled && s?.userId) {
         setStudentId(s.userId);
+        setSessionExpiresAt(typeof s.expiresAt === "number" ? s.expiresAt : null);
         const u = findDemoUser(s.userId);
         setStudentDisplayName(u?.displayName ?? s.userId);
       }
+      try {
+        const settings = await api.settings.get();
+        if (!cancelled) setKioskMode(settings?.kioskMode ?? false);
+      } catch {
+        if (!cancelled) setKioskMode(false);
+      }
+      const vr = await api.runaFiles.getVaultRoot();
+      if (!cancelled && vr.ok && vr.path) setVaultPath(vr.path);
+      if (!cancelled) await refreshShortcuts();
     })();
-  }, [api]);
+    return () => {
+      cancelled = true;
+    };
+  }, [api, refreshShortcuts]);
+
+  useEffect(() => {
+    if (!editTarget) {
+      setEditLabel("");
+      setEditPath("");
+      return;
+    }
+    setEditLabel(editTarget.label);
+    setEditPath(editTarget.targetPath);
+  }, [editTarget]);
+
+  useEffect(() => {
+    if (!shortcutMenu) return;
+    const onDocMouseDown = (ev: MouseEvent) => {
+      if (shortcutMenuRef.current?.contains(ev.target as Node)) return;
+      setShortcutMenu(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setShortcutMenu(null);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [shortcutMenu]);
+
+  useEffect(() => {
+    if (!editTarget) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setEditTarget(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [editTarget]);
+
+  useEffect(() => {
+    if (!showCreateShortcutModal) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setShowCreateShortcutModal(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showCreateShortcutModal]);
+
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(STUDENT_TOUR_STORAGE_KEY)) {
+        setShowStudentTour(true);
+      }
+    } catch {
+      /* private mode */
+    }
+  }, []);
+
+  const dismissStudentTour = () => {
+    try {
+      localStorage.setItem(STUDENT_TOUR_STORAGE_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+    setShowStudentTour(false);
+    void api.telemetry.record("student_tour_dismissed", {});
+  };
 
   const handleLogout = async () => {
     await api.session.clear();
     navigate("/");
   };
 
+  const pickTargetFile = async () => {
+    const picked = await api.dialog.openFile(SHORTCUT_PICK_FILTERS);
+    if (!picked) return;
+    setDraftPath(picked);
+    setDraftLabel((prev) => {
+      if (prev.trim()) return prev;
+      const base =
+        picked
+          .split(/[/\\]/)
+          .pop()
+          ?.replace(/\.(exe|lnk)$/i, "") ?? "Application";
+      return base.slice(0, 80);
+    });
+  };
+
+  const addShortcut = async () => {
+    const targetPath = draftPath.trim();
+    if (!targetPath) {
+      pushToast("Choose an application or .lnk file first.", "warn");
+      return;
+    }
+    const label = draftLabel.trim() || "Shortcut";
+    const res = await api.lab.addShortcut({ label, targetPath });
+    setShortcutsList(res.shortcuts);
+    if (res.ok) {
+      pushToast(`Added “${label}”`, "success");
+      setDraftPath("");
+      setDraftLabel("");
+      setShowCreateShortcutModal(false);
+      void api.telemetry.record("lab_shortcut_added_ui", { id: res.item.id });
+    } else {
+      pushToast(res.error, "error");
+    }
+  };
+
+  const removeShortcut = async (id: string) => {
+    const res = await api.lab.removeShortcut(id);
+    setShortcutsList(res.shortcuts);
+    if (res.ok) {
+      pushToast("Shortcut removed", "info");
+      void api.telemetry.record("lab_shortcut_removed", { id });
+    } else {
+      pushToast(res.error, "error");
+    }
+  };
+
+  const openShortcutContextMenu = (e: React.MouseEvent, entry: ElectronLabShortcut) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!canEditShortcuts) return;
+    const menuW = 168;
+    const menuH = 92;
+    const pad = 8;
+    const x = Math.min(e.clientX, window.innerWidth - menuW - pad);
+    const y = Math.min(e.clientY, window.innerHeight - menuH - pad);
+    setShortcutMenu({ x, y, entry });
+  };
+
+  const pickEditPath = async () => {
+    const picked = await api.dialog.openFile(SHORTCUT_PICK_FILTERS);
+    if (picked) setEditPath(picked);
+  };
+
+  const saveEditShortcut = async () => {
+    if (!editTarget) return;
+    const label = editLabel.trim();
+    const targetPath = editPath.trim();
+    if (!label || !targetPath) {
+      pushToast("Name and target path are required.", "warn");
+      return;
+    }
+    const res = await api.lab.updateShortcut({
+      id: editTarget.id,
+      label,
+      targetPath,
+    });
+    setShortcutsList(res.shortcuts);
+    if (res.ok) {
+      pushToast("Shortcut updated", "success");
+      setEditTarget(null);
+      void api.telemetry.record("lab_shortcut_updated_ui", { id: editTarget.id });
+    } else {
+      pushToast(res.error, "error");
+    }
+  };
+
+  const launchApp = async (entry: ElectronLabShortcut) => {
+    const r = await api.lab.launch(entry.id);
+    void api.telemetry.record("lab_launch", { id: entry.id, ok: r.ok });
+    if (r.ok) {
+      pushToast(`Opening ${entry.label}…`, "info");
+    } else {
+      pushToast(
+        `${r.error ?? "Could not launch"}. If this persists, contact lab tech.`,
+        "error",
+      );
+    }
+  };
+
+  const formatTime = (secs: number) => {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  };
+
   const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).toUpperCase();
+  const sessionRemainingLabel = formatSessionRemaining(sessionExpiresAt, now.getTime());
 
   return (
     <div className="flex flex-col h-full min-h-0" style={{ background: "#0d1320", fontFamily: GROTESK }}>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-      <ToastContainer toast={toast} onDismiss={dismissToast} />
-
-      {/* ── TOP NAVBAR ── */}
       <header
         className="flex items-center justify-between px-5 h-14 border-b border-[#1a2640] shrink-0"
         style={{ background: "#0f1828" }}
       >
-        <div className="flex items-center gap-5">
-          <span className="text-[#7eb5f5]" style={{ fontSize: "16px", fontFamily: BRAND, letterSpacing: "0.12em" }}>
+        <div className="flex items-center gap-5 min-w-0">
+          <span className="text-[#7eb5f5] shrink-0" style={{ fontSize: "16px", fontFamily: BRAND, letterSpacing: "0.12em" }}>
             RUNA
           </span>
-          <span className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>·</span>
-          <span className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO, letterSpacing: "0.15em" }}>SENTINEL</span>
-          <div className="flex items-center gap-2 px-3 py-1 rounded-sm border border-[#2a3a55]" style={{ background: "#1a2640" }}>
+          <span className="text-[#4a6080] shrink-0" style={{ fontSize: "10px", fontFamily: MONO }}>·</span>
+          <span className="text-[#c5d5ea] truncate" style={{ fontSize: "10px", fontFamily: MONO, letterSpacing: "0.12em" }}>
+            LAB SESSION
+          </span>
+          <div className="flex items-center gap-2 px-3 py-1 rounded-sm border border-[#2a3a55] shrink-0" style={{ background: "#1a2640" }}>
             <Shield size={11} className="text-[#4a6fa5]" />
             <span className="tracking-widest uppercase text-[#4a6fa5]" style={{ fontSize: "9px", fontFamily: MONO }}>
-              Student Session
+              Student
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          {/* Duration of Use */}
+        <div className="flex items-center gap-4 shrink-0">
           <div className="text-right">
             <div className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
               Elapsed Time
@@ -156,7 +338,6 @@ export function StudentDashboard() {
             </div>
           </div>
 
-          {/* Terminal ID */}
           <div
             className="relative flex items-center gap-2 border border-[#1e2e48] rounded-sm px-3 py-1.5"
             style={{ background: "#111d30" }}
@@ -170,6 +351,7 @@ export function StudentDashboard() {
               </div>
             </div>
             <button
+              type="button"
               className="w-8 h-8 rounded-sm bg-[#3a5a9a] flex items-center justify-center hover:bg-[#4a6ab5] transition-colors"
               onClick={() => setShowUserMenu((v) => !v)}
               title="User menu"
@@ -178,7 +360,7 @@ export function StudentDashboard() {
             </button>
             {showUserMenu && (
               <div
-                className="absolute top-full right-0 mt-2 rounded-sm border border-[#2a3a55] overflow-hidden z-50"
+                className="absolute top-full right-0 mt-2 rounded-sm border border-[#2a3a55] overflow-hidden z-[var(--z-popover)]"
                 style={{ background: "#111d30", minWidth: "160px" }}
               >
                 <div className="px-4 py-3 border-b border-[#1a2640]">
@@ -186,6 +368,7 @@ export function StudentDashboard() {
                   <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>{studentId}</p>
                 </div>
                 <button
+                  type="button"
                   className="w-full flex items-center gap-2 px-4 py-3 text-left text-[#e05c6a] hover:bg-[#1e2e48] transition-colors"
                   style={{ fontSize: "11px", fontFamily: MONO }}
                   onClick={handleLogout}
@@ -201,200 +384,372 @@ export function StudentDashboard() {
             )}
           </div>
 
-          {/* Notification Bell */}
-          <div className="relative">
-            <NotificationBell notifications={notifications} onOpen={() => setShowPanel((v) => !v)} />
-            {showPanel && (
-              <NotificationPanel
-                notifications={notifications}
-                onClose={() => setShowPanel(false)}
-                onMarkRead={markRead}
-                onMarkAllRead={markAllRead}
-                onDismiss={dismiss}
-                onClearAll={clearAll}
-              />
-            )}
-          </div>
-
-          {/* Settings */}
-          <button
-            className="w-8 h-8 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5] transition-colors"
-            title="Settings"
-            onClick={() => setShowSettings(true)}
-          >
-            <Settings size={16} />
-          </button>
+          <NotificationsMenu />
         </div>
       </header>
 
       <div className="h-[1px] bg-[#1a2640]" />
 
-      {/* ── MAIN BODY ── */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* ── LEFT SIDEBAR — App icons ── */}
+      <div className="flex flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-hidden">
         <aside
-          className="flex flex-col items-center pt-4 pb-3 gap-1 border-r border-[#1a2640] shrink-0"
-          style={{ width: "72px", background: "#0a1120" }}
+          className="flex flex-col items-stretch border-r border-[#1a2640] shrink-0 min-h-0"
+          style={{ width: "76px", background: "#0a1120" }}
         >
-          {apps.map((app) => {
-            const isActive = activeApp === app.id;
-            return (
+          <div className="flex flex-col items-center gap-1 px-1 pt-4 pb-3 border-b border-[#1a2640] w-full shrink-0">
+            <Sparkles size={18} className="text-[#7eb5f5]" />
+            <span className="text-[#4a6080] text-center leading-tight" style={{ fontSize: "7px", fontFamily: MONO }}>
+              RUNA AGENT
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center gap-2 py-2 px-0">
+            {shortcutsList.length === 0 && (
+              <div className="px-1 text-center text-[#3a5070]" style={{ fontSize: "7px", fontFamily: MONO }}>
+                {canEditShortcuts ? "Tap + below to add" : "No launchers"}
+              </div>
+            )}
+            {shortcutsList.map((sc) => (
               <button
-                key={app.id}
-                onClick={() => setActiveApp(app.id)}
-                className="flex flex-col items-center gap-1.5 py-3 w-full transition-all"
-                style={{
-                  background: isActive ? "#162035" : "transparent",
-                  borderLeft: isActive ? "2px solid #3a6fff" : "2px solid transparent",
-                  color: isActive ? "#7eb5f5" : "#3a5070",
-                }}
-                title={app.label}
+                key={sc.id}
+                type="button"
+                title={`${sc.label} — click to launch · right-click for menu`}
+                onClick={() => void launchApp(sc)}
+                onContextMenu={(e) => openShortcutContextMenu(e, sc)}
+                className="flex flex-col items-center gap-1 py-2.5 w-full transition-all rounded-sm hover:bg-[#162035] text-[#7eb5f5]"
               >
-                {app.icon}
-                <span className="tracking-widest" style={{ fontSize: "7px", fontFamily: MONO }}>
-                  {app.label}
+                <AppWindow size={20} className="opacity-90" />
+                <span
+                  className="text-center px-0.5 line-clamp-2 leading-tight"
+                  style={{ fontSize: "6px", fontFamily: MONO }}
+                >
+                  {sc.label}
                 </span>
               </button>
-            );
-          })}
+            ))}
+          </div>
+          {canEditShortcuts && (
+            <div className="shrink-0 border-t border-[#1a2640] p-2 flex justify-center">
+              <button
+                type="button"
+                title="Create shortcut"
+                onClick={() => {
+                  setDraftLabel("");
+                  setDraftPath("");
+                  setShowCreateShortcutModal(true);
+                }}
+                className="w-11 h-11 rounded-sm flex items-center justify-center border border-[#3a6fff55] text-[#7eb5f5] hover:bg-[#1e3055] transition-colors"
+                style={{ background: "#111d30" }}
+              >
+                <Plus size={22} strokeWidth={2} />
+              </button>
+            </div>
+          )}
         </aside>
 
-        {/* ── CENTER CONTENT ── */}
-        <main className="flex-1 min-h-0 overflow-y-auto relative">
-          <AppContent activeApp={activeApp} studentId={studentId || "student@runa.edu.ph"} />
+        <main className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden relative">
+          <div className="flex-1 min-h-0 p-4 box-border flex flex-col">
+            <ProductivityAssistant
+              ref={assistantRef}
+              role="student"
+              userId={studentId || "student@runa.edu.ph"}
+              sessionExpiresAt={sessionExpiresAt}
+              vaultDisplayPath={vaultPath}
+              height="100%"
+            />
+          </div>
         </main>
 
-        {/* ── RIGHT PANEL ── */}
-        <aside
-          className="flex flex-col border-l border-[#1a2640] shrink-0 py-5 px-4 gap-6"
-          style={{ width: "215px", background: "#0a1120" }}
-        >
-          {/* Station Performance */}
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
-                Station Performance
-              </span>
-              <div className="w-2 h-2 rounded-full bg-[#3a6fff]" />
-            </div>
-            <div className="mb-4">
-              <div className="flex justify-between mb-1.5">
-                <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>CPU Load</span>
-                <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>12%</span>
-              </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-                <div className="h-full rounded-full" style={{ width: "12%", background: "#3a6fff" }} />
-              </div>
-            </div>
-            <div>
-              <div className="flex justify-between mb-1.5">
-                <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>Memory Usage</span>
-                <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>4.2 / 16 GB</span>
-              </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-                <div className="h-full rounded-full" style={{ width: "26%", background: "#3a6fff" }} />
-              </div>
-            </div>
-          </div>
-
-          <div className="h-[1px] bg-[#1a2640]" />
-
-          {/* Connection Status */}
-          <div>
-            <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Connection Status
-            </span>
-            <div className="flex items-center gap-2 text-[#c5d5ea]">
-              <Wifi size={14} className="text-[#4a6fa5]" />
-              <span style={{ fontSize: "11px", fontFamily: MONO }}>RUNA-GUEST-SECURE</span>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#4ac77e]" />
-              <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>Connected · WPA3</span>
-            </div>
-          </div>
-
-          <div className="h-[1px] bg-[#1a2640]" />
-
-          {/* Active App */}
-          <div>
-            <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Active Application
-            </span>
-            <div
-              className="flex items-center gap-2 px-3 py-2 rounded-md border border-[#2a3a55]"
-              style={{ background: "#162035" }}
-            >
-              <div className="w-2 h-2 rounded-full bg-[#4ac77e]" />
-              <span className="text-[#7eb5f5] tracking-widest uppercase" style={{ fontSize: "10px", fontFamily: MONO }}>
-                {apps.find((a) => a.id === activeApp)?.label ?? "VS CODE"}
-              </span>
-            </div>
-          </div>
-
-          <div className="h-[1px] bg-[#1a2640]" />
-
-          {/* Student badge */}
-          <div>
-            <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Access Level
-            </span>
-            <div className="flex items-center gap-2">
-              <Shield size={13} className="text-[#4a6080]" />
-              <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>STUDENT</span>
-            </div>
-            <p className="text-[#2a3a55] mt-1" style={{ fontSize: "9px", fontFamily: MONO }}>
-              Standard lab privileges
-            </p>
-          </div>
-        </aside>
+        <StudentRpaSidePanel
+          studentId={studentId}
+          sessionRemainingLabel={sessionRemainingLabel}
+          vaultPathTail={vaultPath ? pathTail(vaultPath, 56) : null}
+          vaultPathFull={vaultPath}
+          kioskMode={kioskMode}
+          canEditShortcuts={canEditShortcuts}
+          onWorkflowSelect={(text) => assistantRef.current?.setComposerText(text)}
+        />
       </div>
 
-      {/* ── BOTTOM TASKBAR ── */}
       <footer
         className="flex items-center justify-between px-5 h-11 border-t border-[#1a2640] shrink-0"
         style={{ background: "#0f1828" }}
       >
-        <div className="flex items-center gap-1">
-          {apps.map((app) => (
-            <button
-              key={app.id}
-              onClick={() => setActiveApp(app.id)}
-              className="relative flex flex-col items-center px-3 pb-1 pt-0.5 transition-colors"
-              style={{ color: activeApp === app.id ? "#7eb5f5" : "#4a6080" }}
-              title={app.label}
-            >
-              <span style={{ display: "flex", transform: "scale(0.72)", transformOrigin: "center" }}>
-                {app.icon}
-              </span>
-              {activeApp === app.id && (
-                <div
-                  className="absolute bottom-0 left-1/2 -translate-x-1/2 w-5 h-[2px] rounded-full"
-                  style={{ background: "#3a6fff" }}
-                />
-              )}
-            </button>
-          ))}
+        <div className="flex items-center gap-3 min-w-0 text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+          <Monitor size={12} className="shrink-0" />
+          <span className="truncate">
+            {canEditShortcuts ? (
+              <>
+                Use <strong className="text-[#7eb5f5]">+</strong> on the rail to add launchers — Runa opens real Windows apps.
+              </>
+            ) : (
+              <>Runa opens real Windows apps from the rail.{kioskMode ? " Kiosk: list is IT-managed." : ""}</>
+            )}
+          </span>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 min-w-0 shrink-0">
+          <div
+            className="px-2.5 py-1 rounded-md border shrink-0"
+            style={{
+              background: kioskMode ? "#2a1810" : "#162035",
+              borderColor: kioskMode ? "#e8821a55" : "#3a6fff44",
+            }}
+          >
+            <span
+              className="tracking-widest uppercase"
+              style={{
+                fontSize: "8px",
+                fontFamily: MONO,
+                color: kioskMode ? "#e8821a" : "#3a6fff",
+              }}
+            >
+              {kioskMode === null ? "…" : kioskMode ? "KIOSK MODE ACTIVE" : "LAB SESSION ACTIVE"}
+            </span>
+          </div>
           <div className="flex items-center gap-1.5 text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
             <Monitor size={11} />
             <span className="tracking-widest uppercase">UNIT-04</span>
           </div>
-          <button
-            className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors"
-            onClick={() => setShowSettings(true)}
-            title="Settings"
-          >
-            <Volume2 size={14} />
-          </button>
           <div className="text-[#4a6080] text-right tabular-nums" style={{ fontSize: "10px", fontFamily: MONO }}>
             <div>{timeStr}</div>
             <div style={{ fontSize: "9px" }}>{dateStr}</div>
           </div>
         </div>
       </footer>
+
+      {showCreateShortcutModal && canEditShortcuts && (
+        <div
+          className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center px-4"
+          style={{ background: "rgba(5, 10, 20, 0.82)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="create-shortcut-title"
+          onClick={() => setShowCreateShortcutModal(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border p-5 shadow-xl"
+            style={{ background: "#111d30", borderColor: "#2a3a55" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="create-shortcut-title" className="text-[#c5d5ea] mb-4" style={{ fontSize: "15px", fontFamily: BRAND }}>
+              Create shortcut
+            </h2>
+            <div className="flex flex-wrap gap-1 mb-3">
+              {SHORTCUT_NAME_SUGGESTIONS.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => setDraftLabel(name)}
+                  className="px-2 py-0.5 rounded border border-[#2a3a55] text-[#4a6080] hover:text-[#7eb5f5] hover:border-[#3a5a9a] transition-colors"
+                  style={{ fontSize: "8px", fontFamily: MONO }}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            <label className="block mb-3">
+              <span className="text-[#4a6080] uppercase tracking-wider" style={{ fontSize: "8px", fontFamily: MONO }}>
+                Display name
+              </span>
+              <input
+                type="text"
+                value={draftLabel}
+                onChange={(e) => setDraftLabel(e.target.value)}
+                placeholder="e.g. VS Code"
+                className="mt-1 w-full rounded-sm px-2 py-1.5 text-[#c5d5ea] border bg-[#0f1a2a] border-[#1e2e48] outline-none"
+                style={{ fontSize: "12px", fontFamily: MONO }}
+                maxLength={80}
+              />
+            </label>
+            <div className="mb-4">
+              <span className="text-[#4a6080] uppercase tracking-wider" style={{ fontSize: "8px", fontFamily: MONO }}>
+                Target
+              </span>
+              <p className="text-[#4a6080] mt-1 break-all" style={{ fontSize: "10px", fontFamily: MONO }} title={draftPath || undefined}>
+                {draftPath ? pathTail(draftPath, 56) : "—"}
+              </p>
+              <button
+                type="button"
+                onClick={() => void pickTargetFile()}
+                className="mt-2 px-2 py-1 rounded border border-[#2a3a55] text-[#7eb5f5] hover:bg-[#1e2e48] transition-colors"
+                style={{ fontSize: "10px", fontFamily: MONO }}
+              >
+                Choose .exe / .lnk…
+              </button>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={() => setShowCreateShortcutModal(false)}
+                className="px-3 py-2 rounded-sm border border-[#2a3a55] text-[#4a6080] hover:bg-[#1e2e48]"
+                style={{ fontSize: "11px", fontFamily: MONO }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void addShortcut()}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-sm border border-[#3a6fff55] text-[#7eb5f5] hover:bg-[#1e3055]"
+                style={{ fontSize: "11px", fontFamily: MONO }}
+              >
+                <Plus size={14} /> Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {shortcutMenu && canEditShortcuts && (
+        <div
+          ref={shortcutMenuRef}
+          className="fixed z-[10001] w-[168px] rounded-md border py-1 shadow-xl"
+          style={{ left: shortcutMenu.x, top: shortcutMenu.y, background: "#111d30", borderColor: "#2a3a55" }}
+          role="menu"
+          aria-label="Shortcut actions"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[#c5d5ea] hover:bg-[#1e2e48] transition-colors"
+            style={{ fontSize: "12px", fontFamily: MONO }}
+            onClick={() => {
+              setEditTarget(shortcutMenu.entry);
+              setShortcutMenu(null);
+            }}
+          >
+            <Pencil size={14} className="text-[#7eb5f5] shrink-0" />
+            Edit…
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[#e05c6a] hover:bg-[#1e2e48] transition-colors"
+            style={{ fontSize: "12px", fontFamily: MONO }}
+            onClick={() => {
+              void removeShortcut(shortcutMenu.entry.id);
+              setShortcutMenu(null);
+            }}
+          >
+            <Trash2 size={14} className="shrink-0" />
+            Remove
+          </button>
+        </div>
+      )}
+
+      {editTarget && (
+        <div
+          className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center px-4"
+          style={{ background: "rgba(5, 10, 20, 0.82)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-shortcut-title"
+          onClick={() => setEditTarget(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border p-5 shadow-xl"
+            style={{ background: "#111d30", borderColor: "#2a3a55" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="edit-shortcut-title" className="text-[#c5d5ea] mb-4" style={{ fontSize: "15px", fontFamily: BRAND }}>
+              Edit shortcut
+            </h2>
+            <label className="block mb-3">
+              <span className="text-[#4a6080] uppercase tracking-wider" style={{ fontSize: "8px", fontFamily: MONO }}>
+                Display name
+              </span>
+              <input
+                type="text"
+                value={editLabel}
+                onChange={(e) => setEditLabel(e.target.value)}
+                className="mt-1 w-full rounded-sm px-2 py-1.5 text-[#c5d5ea] border bg-[#0f1a2a] border-[#1e2e48] outline-none"
+                style={{ fontSize: "12px", fontFamily: MONO }}
+                maxLength={80}
+              />
+            </label>
+            <div className="mb-4">
+              <span className="text-[#4a6080] uppercase tracking-wider" style={{ fontSize: "8px", fontFamily: MONO }}>
+                Target
+              </span>
+              <p className="text-[#4a6080] mt-1 break-all" style={{ fontSize: "10px", fontFamily: MONO }} title={editPath}>
+                {editPath ? pathTail(editPath, 56) : "—"}
+              </p>
+              <button
+                type="button"
+                onClick={() => void pickEditPath()}
+                className="mt-2 px-2 py-1 rounded border border-[#2a3a55] text-[#7eb5f5] hover:bg-[#1e2e48] transition-colors"
+                style={{ fontSize: "10px", fontFamily: MONO }}
+              >
+                Choose .exe / .lnk…
+              </button>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={() => setEditTarget(null)}
+                className="px-3 py-2 rounded-sm border border-[#2a3a55] text-[#4a6080] hover:bg-[#1e2e48]"
+                style={{ fontSize: "11px", fontFamily: MONO }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveEditShortcut()}
+                className="px-3 py-2 rounded-sm border border-[#3a6fff55] text-[#7eb5f5] hover:bg-[#1e3055]"
+                style={{ fontSize: "11px", fontFamily: MONO }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showStudentTour && (
+        <div
+          className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center px-6"
+          style={{ background: "rgba(5, 10, 20, 0.82)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="runa-tour-title"
+        >
+          <div
+            className="max-w-md w-full rounded-lg border p-6 shadow-xl"
+            style={{ background: "#111d30", borderColor: "#2a3a55" }}
+          >
+            <h2 id="runa-tour-title" className="text-[#c5d5ea] mb-3" style={{ fontSize: "16px", fontFamily: BRAND }}>
+              Welcome to Runa (student)
+            </h2>
+            <ul className="text-[#8aa0c0] space-y-2 mb-5" style={{ fontSize: "12px", lineHeight: 1.5 }}>
+              <li>
+                <strong className="text-[#7eb5f5]">Shortcuts:</strong> tap the <strong className="text-[#7eb5f5]">+</strong>{" "}
+                button at the bottom of the left rail, then pick a display name and the real{" "}
+                <code className="text-[#4a6080]">.exe</code> or <code className="text-[#4a6080]">.lnk</code>.
+              </li>
+              <li>
+                <strong className="text-[#7eb5f5]">Runa_Folder</strong> sits next to the Runa program when installed, or under
+                app data in development — that is where safe file automation runs.
+              </li>
+              <li>
+                <strong className="text-[#7eb5f5]">Kiosk labs:</strong> IT locks the list; ask lab tech to change it.
+              </li>
+              <li>
+                <strong className="text-[#7eb5f5]">Offline AI:</strong> try again when the network is back, or ask lab tech.
+              </li>
+              <li>
+                <strong className="text-[#7eb5f5]">Right panel:</strong> human-in-the-loop queue, your automation audit
+                trace, workflow starters, and risk policy — bounded RPA for the lab.
+              </li>
+            </ul>
+            <button
+              type="button"
+              onClick={dismissStudentTour}
+              className="w-full py-2.5 rounded-sm tracking-widest uppercase text-[#c5d5ea] border transition-colors hover:opacity-95"
+              style={{ background: "#3a5a9a", borderColor: "#4a6ab5", fontSize: "11px", fontFamily: MONO }}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

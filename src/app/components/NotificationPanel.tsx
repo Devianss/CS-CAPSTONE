@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import {
   Bell,
   X,
@@ -17,7 +17,7 @@ const MONO = "'Space Mono', monospace";
 const GROTESK = "'Space Grotesk', sans-serif";
 
 export type Notification = {
-  id: number;
+  id: string;
   type: "security" | "network" | "system" | "warning" | "success" | "info";
   title: string;
   message: string;
@@ -34,9 +34,9 @@ const TYPE_CONFIG = {
   info: { icon: Info, color: "#4a6fa5", bg: "#4a6fa518", label: "Info" },
 };
 
-const INITIAL_NOTIFICATIONS: Notification[] = [
+export const INITIAL_NOTIFICATIONS: Notification[] = [
   {
-    id: 1,
+    id: "1",
     type: "security",
     title: "Login Attempt Detected",
     message: "New authenticated session started from terminal UNIT-04.",
@@ -44,7 +44,7 @@ const INITIAL_NOTIFICATIONS: Notification[] = [
     read: false,
   },
   {
-    id: 2,
+    id: "2",
     type: "system",
     title: "Session Timer Running",
     message: "Your session will expire in 2 hours 45 minutes. Save your work.",
@@ -52,7 +52,7 @@ const INITIAL_NOTIFICATIONS: Notification[] = [
     read: false,
   },
   {
-    id: 3,
+    id: "3",
     type: "network",
     title: "Connected to PCU-GUEST-SECURE",
     message: "Wi-Fi connection established. Encrypted via WPA3.",
@@ -60,7 +60,7 @@ const INITIAL_NOTIFICATIONS: Notification[] = [
     read: true,
   },
   {
-    id: 4,
+    id: "4",
     type: "success",
     title: "Access Code Validated",
     message: "AES-256 access code authentication successful.",
@@ -68,7 +68,7 @@ const INITIAL_NOTIFICATIONS: Notification[] = [
     read: true,
   },
   {
-    id: 5,
+    id: "5",
     type: "warning",
     title: "Persistent Storage Disabled",
     message: "System policy prevents saving files locally this session.",
@@ -190,9 +190,9 @@ function Toast({ notification, onDismiss }: ToastProps) {
 interface NotificationPanelProps {
   notifications: Notification[];
   onClose: () => void;
-  onMarkRead: (id: number) => void;
+  onMarkRead: (id: string) => void;
   onMarkAllRead: () => void;
-  onDismiss: (id: number) => void;
+  onDismiss: (id: string) => void;
   onClearAll: () => void;
 }
 
@@ -205,32 +205,18 @@ export function NotificationPanel({
   onClearAll,
 }: NotificationPanelProps) {
   const [filter, setFilter] = useState<"all" | "unread">("all");
-  const panelRef = useRef<HTMLDivElement>(null);
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   const filtered = filter === "unread"
     ? notifications.filter((n) => !n.read)
     : notifications;
 
-  // Close on outside click
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [onClose]);
-
   return (
     <div
-      ref={panelRef}
-      className="absolute top-full right-0 mt-2 rounded-xl border shadow-2xl z-50 flex flex-col"
+      className="rounded-xl border shadow-2xl flex flex-col w-[360px] max-w-[calc(100vw-2rem)]"
       style={{
         background: "#0f1828",
         borderColor: "#1e2e48",
-        width: "360px",
         maxHeight: "520px",
         fontFamily: GROTESK,
       }}
@@ -388,80 +374,11 @@ export function NotificationPanel({
   );
 }
 
-// ─── Notification Hook ────────────────────────────────────────────────────────
+// ─── Live pool (used by NotificationProvider) ───────────────────────────────
 
-let nextId = INITIAL_NOTIFICATIONS.length + 1;
-
-export function useNotifications() {
-  const [notifications, setNotifications] = useState<Notification[]>(INITIAL_NOTIFICATIONS);
-  const [toast, setToast] = useState<Notification | null>(null);
-  const [showPanel, setShowPanel] = useState(false);
-  const poolIndex = useRef(0);
-
-  // Simulate incoming notifications every 20–35 seconds
-  useEffect(() => {
-    function scheduleNext() {
-      const delay = 20000 + Math.random() * 15000;
-      return setTimeout(() => {
-        const pool = LIVE_POOL[poolIndex.current % LIVE_POOL.length];
-        poolIndex.current++;
-        const newNotif: Notification = {
-          ...pool,
-          id: nextId++,
-          time: new Date(),
-          read: false,
-        };
-        setNotifications((prev) => [newNotif, ...prev]);
-        setToast(newNotif);
-        timerId = scheduleNext();
-      }, delay);
-    }
-    let timerId = scheduleNext();
-    return () => clearTimeout(timerId);
-  }, []);
-
-  const markRead = (id: number) =>
-    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
-
-  const markAllRead = () =>
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-
-  const dismiss = (id: number) =>
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
-
-  const clearAll = () => setNotifications([]);
-
-  const dismissToast = () => setToast(null);
-
-  return {
-    notifications,
-    toast,
-    showPanel,
-    setShowPanel,
-    markRead,
-    markAllRead,
-    dismiss,
-    clearAll,
-    dismissToast,
-  };
+let nextNotifId = INITIAL_NOTIFICATIONS.length + 1;
+export function takeNextNotificationId(): string {
+  return String(nextNotifId++);
 }
 
-// ─── Toast Container ──────────────────────────────────────────────────────────
-
-export function ToastContainer({
-  toast,
-  onDismiss,
-}: {
-  toast: Notification | null;
-  onDismiss: () => void;
-}) {
-  if (!toast) return null;
-  return (
-    <div
-      className="fixed bottom-16 right-5 z-[100]"
-      style={{ animation: "slideInRight 0.3s ease" }}
-    >
-      <Toast notification={toast} onDismiss={onDismiss} />
-    </div>
-  );
-}
+export { LIVE_POOL };

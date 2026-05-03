@@ -9,6 +9,8 @@ import {
   GraduationCap,
   ShieldCheck,
   AlertTriangle,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { authenticate } from "../auth/demoUsers";
 import { useElectron } from "../ipc/useElectron";
@@ -31,6 +33,7 @@ export function LoginPage() {
   const [persistent, setPersistent] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,7 +96,7 @@ export function LoginPage() {
         </div>
 
         {/* Two-column layout */}
-        <div className="relative z-10 w-full max-w-5xl flex flex-col md:flex-row items-center gap-12">
+        <div className="relative z-[var(--z-banner)] w-full max-w-5xl flex flex-col md:flex-row items-center gap-12">
 
           {/* Left: Title & Info */}
           <div className="flex-1 min-w-0">
@@ -105,19 +108,10 @@ export function LoginPage() {
             </h1>
             <div className="w-16 h-[2px] bg-[#2a3a55] mb-5" />
             <p className="text-[#4a6fa5] max-w-sm" style={{ fontSize: "14px" }}>
-              Official Lab Management Interface. Secure Connection Established.
-              Authorized Users Only.
+              Robotic Unified Network Agent.
             </p>
 
             <div className="flex gap-10 mt-8">
-              <div>
-                <p className="text-[#2a3a55] uppercase tracking-widest mb-1" style={{ fontSize: "9px", fontFamily: MONO }}>
-                  Terminal ID
-                </p>
-                <p className="text-[#c5d5ea]" style={{ fontSize: "12px", fontFamily: MONO }}>
-                  Encrypted_L3
-                </p>
-              </div>
               <div>
                 <p className="text-[#2a3a55] uppercase tracking-widest mb-1" style={{ fontSize: "9px", fontFamily: MONO }}>
                   System Version
@@ -224,12 +218,13 @@ export function LoginPage() {
                   Password
                 </label>
                 <div className="relative">
+                  <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#2e4060] pointer-events-none" />
                   <input
-                    type="password"
+                    type={showPassword ? "text" : "password"}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••••••"
-                    className="w-full rounded-sm px-4 py-3 pr-10 text-[#c5d5ea] placeholder-[#2e4060] border outline-none transition-colors"
+                    className="w-full rounded-sm pl-10 pr-11 py-3 text-[#c5d5ea] placeholder-[#2e4060] border outline-none transition-colors"
                     style={{
                       background: "#0f1a2a",
                       borderColor: "#1e2e48",
@@ -239,7 +234,16 @@ export function LoginPage() {
                     onFocus={(e) => (e.target.style.borderColor = isAdmin ? "#e8821a" : "#4a6fa5")}
                     onBlur={(e) => (e.target.style.borderColor = "#1e2e48")}
                   />
-                  <Lock size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#2e4060]" />
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onClick={() => setShowPassword((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-[#4a6080] hover:text-[#7eb5f5] transition-colors"
+                    title={showPassword ? "Hide password" : "Show password"}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
                 </div>
                 {loginError && (
                   <div
@@ -315,7 +319,7 @@ export function LoginPage() {
       </div>
 
       {/* Bottom status bar */}
-      <div className="flex items-center justify-between px-8 pb-6 relative z-10">
+      <div className="flex items-center justify-between px-8 pb-6 relative z-[var(--z-banner)]">
         <div className="flex items-center gap-2 border border-[#1e2e48] bg-[#111d30] px-4 py-2 rounded-sm">
           <Shield size={12} className="text-[#4a6fa5]" />
           <span className="text-[#c5d5ea] tracking-widest uppercase" style={{ fontSize: "9px", fontFamily: MONO }}>
@@ -323,11 +327,11 @@ export function LoginPage() {
           </span>
         </div>
         <span className="text-[#2a3a55] tracking-widest uppercase" style={{ fontSize: "9px", fontFamily: MONO }}>
-          Global Security Perimeter V2.1
+          PCU-Dasmariñas · RUNA
         </span>
         <div className="flex items-center gap-3">
           <span className="text-[#2a3a55] tracking-widest uppercase" style={{ fontSize: "9px", fontFamily: MONO }}>
-            © RUNA Systems
+            © RUNA
           </span>
           <div className="flex items-center gap-1">
             <div className="w-2 h-2 rounded-full bg-[#2a3a55]" />

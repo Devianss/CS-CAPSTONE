@@ -10,6 +10,13 @@ export type ElectronActorRole = ElectronRole | "system" | "agent";
 
 export type ElectronRiskTier = "low" | "medium" | "high";
 
+/** User-added launcher (.exe / .lnk); list starts empty until students or IT add entries. */
+export interface ElectronLabShortcut {
+  id: string;
+  label: string;
+  targetPath: string;
+}
+
 export type ElectronActionScope = "self" | "session" | "lab" | "system";
 
 export type ElectronActionType =
@@ -20,6 +27,10 @@ export type ElectronActionType =
   | "recommend_action"
   | "draft_policy"
   | "mark_notification"
+  | "runa_create_folder"
+  | "runa_write_file"
+  | "runa_move_within_vault"
+  | "student_hitl_escalation"
   | "wipe_terminal"
   | "lock_cluster"
   | "terminate_session"
@@ -142,6 +153,46 @@ interface ElectronAPI {
   };
   dialog: {
     openFile(filters?: { name: string; extensions: string[] }[]): Promise<string | null>;
+  };
+  lab: {
+    getShortcuts(): Promise<ElectronLabShortcut[]>;
+    addShortcut(payload: {
+      label: string;
+      targetPath: string;
+    }): Promise<
+      | { ok: true; shortcuts: ElectronLabShortcut[]; item: ElectronLabShortcut }
+      | { ok: false; shortcuts: ElectronLabShortcut[]; error: string }
+    >;
+    updateShortcut(payload: {
+      id: string;
+      label: string;
+      targetPath: string;
+    }): Promise<
+      | { ok: true; shortcuts: ElectronLabShortcut[]; item: ElectronLabShortcut }
+      | { ok: false; shortcuts: ElectronLabShortcut[]; error: string }
+    >;
+    removeShortcut(id: string): Promise<
+      | { ok: true; shortcuts: ElectronLabShortcut[] }
+      | { ok: false; shortcuts: ElectronLabShortcut[]; error: string }
+    >;
+    launch(id: string): Promise<{ ok: boolean; error?: string }>;
+  };
+  runaFiles: {
+    getVaultRoot(): Promise<{ ok: boolean; path: string | null; error?: string }>;
+    getSessionWorkspaceRelative(): Promise<{
+      ok: boolean;
+      relative: string | null;
+      error?: string;
+    }>;
+    createFolder(relativePath: string): Promise<{ ok: boolean; error?: string; absolute?: string }>;
+    writeTextFile(
+      relativePath: string,
+      content: string,
+    ): Promise<{ ok: boolean; error?: string; absolute?: string }>;
+    listDir(relativePath: string): Promise<{ ok: boolean; entries: string[]; error?: string }>;
+  };
+  telemetry: {
+    record(event: string, meta?: Record<string, unknown>): Promise<boolean>;
   };
   tray: {
     notify(title: string, body: string): void;

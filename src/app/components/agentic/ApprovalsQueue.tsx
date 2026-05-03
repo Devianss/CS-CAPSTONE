@@ -218,7 +218,7 @@ export function ApprovalsQueue({ currentAdminId, onChange }: ApprovalsQueueProps
       {/* Request-info modal */}
       {infoModal.open && (
         <div
-          className="fixed inset-0 flex items-center justify-center z-50"
+          className="fixed inset-0 flex items-center justify-center z-[var(--z-modal)]"
           style={{ background: "#0008" }}
           onClick={() => setInfoModal({ open: false, text: "" })}
         >
