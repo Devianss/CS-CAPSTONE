@@ -1,10 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import {
   Shield,
   Settings,
   Wifi,
-  Monitor,
+  X,
   User,
   Volume2,
   LayoutDashboard,
@@ -31,7 +31,7 @@ const BRAND = "'Orbitron', sans-serif";
 type NavItem = {
   id: string;
   label: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 };
 
 const navItems: NavItem[] = [
@@ -57,6 +57,7 @@ export function Dashboard() {
   const [now, setNow] = useState(new Date());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSystemLog, setShowSystemLog] = useState(true);
   const {
     notifications,
     toast,
@@ -189,7 +190,7 @@ export function Dashboard() {
       <div className="h-[1px] bg-[#1a2640]" />
 
       {/* ── MAIN BODY ── */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* ── LEFT SIDEBAR — Admin nav only ── */}
         <aside
           className="flex flex-col items-center pt-4 pb-3 gap-1 border-r border-[#1a2640] shrink-0"
@@ -218,113 +219,126 @@ export function Dashboard() {
           })}
         </aside>
 
-        {/* ── CENTER CONTENT ── */}
-        <main className="flex-1 overflow-y-auto relative">
-          <AdminContent active={activeNav} />
+        {/* ── CENTER + ADMIN DASH ── */}
+        <main className="flex-1 min-h-0 relative overflow-hidden">
+          <div className="flex h-full min-h-0 overflow-y-auto">
+            <div className="flex-1 min-h-0">
+              <AdminContent active={activeNav} />
+            </div>
+
+            {/* ── ADMIN DASH PANEL ── */}
+            <aside
+              className="flex flex-col border-l border-[#1a2640] shrink-0 py-5 px-4 gap-6 overflow-y-auto min-h-0"
+              style={{ width: "215px", background: "#0a1120" }}
+            >
+              {/* Server Performance */}
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
+                    Server Performance
+                  </span>
+                  <div className="w-2 h-2 rounded-full bg-[#4ac77e]" />
+                </div>
+                <div className="mb-4">
+                  <div className="flex justify-between mb-1.5">
+                    <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>CPU Load</span>
+                    <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>18%</span>
+                  </div>
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
+                    <div className="h-full rounded-full" style={{ width: "18%", background: "#3a6fff" }} />
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-1.5">
+                    <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>Memory</span>
+                    <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>6.1 / 32 GB</span>
+                  </div>
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
+                    <div className="h-full rounded-full" style={{ width: "19%", background: "#3a6fff" }} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="h-[1px] bg-[#1a2640]" />
+
+              {/* Connection Status */}
+              <div>
+                <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
+                  Network
+                </span>
+                <div className="flex items-center gap-2 text-[#c5d5ea]">
+                  <Wifi size={14} className="text-[#4a6fa5]" />
+                  <span style={{ fontSize: "11px", fontFamily: MONO }}>RUNA-ADMIN-NET</span>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[#4ac77e]" />
+                  <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>Encrypted · TLS 1.3</span>
+                </div>
+              </div>
+
+              <div className="h-[1px] bg-[#1a2640]" />
+
+              {/* Active View */}
+              <div>
+                <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
+                  Active View
+                </span>
+                <div
+                  className="flex items-center gap-2 px-3 py-2 rounded-md border border-[#2a3a55]"
+                  style={{ background: "#162035" }}
+                >
+                  <div className="w-2 h-2 rounded-full bg-[#3a6fff]" />
+                  <span className="text-[#7eb5f5] tracking-widest uppercase" style={{ fontSize: "10px", fontFamily: MONO }}>
+                    {activeLabel}
+                  </span>
+                </div>
+              </div>
+
+              <div className="h-[1px] bg-[#1a2640]" />
+
+              {/* Admin Role Badge */}
+              <div>
+                <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
+                  Privilege Level
+                </span>
+                <div className="flex items-center gap-2">
+                  <Shield size={13} className="text-[#4a6fa5]" />
+                  <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>SUPER ADMIN</span>
+                </div>
+                <p className="text-[#2a3a55] mt-1" style={{ fontSize: "9px", fontFamily: MONO }}>
+                  Full system privileges
+                </p>
+              </div>
+            </aside>
+          </div>
 
           {/* System log notification */}
-          <div className="absolute bottom-4 left-4 z-10 pointer-events-none">
-            <div
-              className="flex gap-3 p-4 rounded-sm border border-[#1a2640]"
-              style={{ background: "rgba(17,29,48,0.92)", maxWidth: "320px" }}
-            >
-              <div className="w-2 h-2 rounded-full mt-1 shrink-0" style={{ background: "#3a6fff" }} />
-              <div>
-                <p className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO, lineHeight: 1.5 }}>
-                  Admin Policy: All actions are logged and audited per RUNA security protocol.
-                </p>
-                <p className="text-[#2e4060] mt-1" style={{ fontSize: "10px", fontFamily: MONO }}>
-                  System Log {now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                </p>
+          {showSystemLog && (
+            <div className="absolute bottom-4 left-4 z-10 pointer-events-auto">
+              <div
+                className="relative flex gap-3 p-4 rounded-sm border border-[#1a2640]"
+                style={{ background: "rgba(17,29,48,0.92)", maxWidth: "320px" }}
+              >
+                <button
+                  className="absolute top-2 right-2 text-[#4a6080] hover:text-[#c5d5ea]"
+                  onClick={() => setShowSystemLog(false)}
+                  aria-label="Close system log"
+                >
+                  <X size={14} />
+                </button>
+                <div className="w-2 h-2 rounded-full mt-1 shrink-0" style={{ background: "#3a6fff" }} />
+                <div>
+                  <p className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO, lineHeight: 1.5 }}>
+                    Admin Policy: All actions are logged and audited per RUNA security protocol.
+                  </p>
+                  <p className="text-[#2e4060] mt-1" style={{ fontSize: "10px", fontFamily: MONO }}>
+                    System Log {now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </main>
-
-        {/* ── RIGHT PANEL ── */}
-        <aside
-          className="flex flex-col border-l border-[#1a2640] shrink-0 py-5 px-4 gap-6 overflow-y-auto"
-          style={{ width: "215px", background: "#0a1120" }}
-        >
-          {/* Server Performance */}
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
-                Server Performance
-              </span>
-              <div className="w-2 h-2 rounded-full bg-[#4ac77e]" />
-            </div>
-            <div className="mb-4">
-              <div className="flex justify-between mb-1.5">
-                <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>CPU Load</span>
-                <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>18%</span>
-              </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-                <div className="h-full rounded-full" style={{ width: "18%", background: "#3a6fff" }} />
-              </div>
-            </div>
-            <div>
-              <div className="flex justify-between mb-1.5">
-                <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>Memory</span>
-                <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>6.1 / 32 GB</span>
-              </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-                <div className="h-full rounded-full" style={{ width: "19%", background: "#3a6fff" }} />
-              </div>
-            </div>
-          </div>
-
-          <div className="h-[1px] bg-[#1a2640]" />
-
-          {/* Connection Status */}
-          <div>
-            <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Network
-            </span>
-            <div className="flex items-center gap-2 text-[#c5d5ea]">
-              <Wifi size={14} className="text-[#4a6fa5]" />
-              <span style={{ fontSize: "11px", fontFamily: MONO }}>RUNA-ADMIN-NET</span>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#4ac77e]" />
-              <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>Encrypted · TLS 1.3</span>
-            </div>
-          </div>
-
-          <div className="h-[1px] bg-[#1a2640]" />
-
-          {/* Active View */}
-          <div>
-            <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Active View
-            </span>
-            <div
-              className="flex items-center gap-2 px-3 py-2 rounded-md border border-[#2a3a55]"
-              style={{ background: "#162035" }}
-            >
-              <div className="w-2 h-2 rounded-full bg-[#3a6fff]" />
-              <span className="text-[#7eb5f5] tracking-widest uppercase" style={{ fontSize: "10px", fontFamily: MONO }}>
-                {activeLabel}
-              </span>
-            </div>
-          </div>
-
-          <div className="h-[1px] bg-[#1a2640]" />
-
-          {/* Admin Role Badge */}
-          <div>
-            <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Privilege Level
-            </span>
-            <div className="flex items-center gap-2">
-              <Shield size={13} className="text-[#4a6fa5]" />
-              <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>SUPER ADMIN</span>
-            </div>
-            <p className="text-[#2a3a55] mt-1" style={{ fontSize: "9px", fontFamily: MONO }}>
-              Full system privileges
-            </p>
-          </div>
-        </aside>
       </div>
 
       {/* ── BOTTOM TASKBAR ── */}
