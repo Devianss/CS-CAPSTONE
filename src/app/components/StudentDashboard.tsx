@@ -10,6 +10,7 @@ import {
   FolderOpen,
   User,
   Volume2,
+  Bot,
 } from "lucide-react";
 import { SettingsPanel } from "./SettingsPanel";
 import {
@@ -25,6 +26,9 @@ import {
   ToastContainer,
   useNotifications,
 } from "./NotificationPanel";
+import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
+import { useElectron } from "../ipc/useElectron";
+import { findDemoUser } from "../auth/demoUsers";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
@@ -40,6 +44,7 @@ function formatTime(secs: number) {
 type AppItem = { id: string; label: string; icon: React.ReactNode };
 
 const apps: AppItem[] = [
+  { id: "assistant", label: "ASSISTANT", icon: <Bot size={22} /> },
   { id: "vscode",    label: "VS CODE",  icon: <Code2 size={22} /> },
   {
     id: "intellij",
@@ -57,8 +62,14 @@ const apps: AppItem[] = [
   { id: "projects", label: "PROJECTS", icon: <FolderOpen size={22} /> },
 ];
 
-function AppContent({ activeApp }: { activeApp: string }) {
+function AppContent({ activeApp, studentId }: { activeApp: string; studentId: string }) {
   switch (activeApp) {
+    case "assistant":
+      return (
+        <div className="h-full min-h-0 p-4 box-border">
+          <ProductivityAssistant role="student" userId={studentId} height="100%" />
+        </div>
+      );
     case "vscode":    return <VSCodeWindow />;
     case "intellij":  return <IntelliJWindow />;
     case "chrome":    return <ChromeWindow />;
@@ -70,8 +81,11 @@ function AppContent({ activeApp }: { activeApp: string }) {
 
 export function StudentDashboard() {
   const navigate = useNavigate();
+  const api = useElectron();
   const [secondsUsed, setSecondsUsed] = useState(0);
   const [activeApp, setActiveApp] = useState("vscode");
+  const [studentId, setStudentId] = useState("");
+  const [studentDisplayName, setStudentDisplayName] = useState("Student");
   const [now, setNow] = useState(new Date());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -88,11 +102,27 @@ export function StudentDashboard() {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    (async () => {
+      const s = await api.session.get();
+      if (s?.userId) {
+        setStudentId(s.userId);
+        const u = findDemoUser(s.userId);
+        setStudentDisplayName(u?.displayName ?? s.userId);
+      }
+    })();
+  }, [api]);
+
+  const handleLogout = async () => {
+    await api.session.clear();
+    navigate("/");
+  };
+
   const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).toUpperCase();
 
   return (
-    <div className="flex flex-col min-h-screen" style={{ background: "#0d1320", fontFamily: GROTESK }}>
+    <div className="flex flex-col h-full min-h-0" style={{ background: "#0d1320", fontFamily: GROTESK }}>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       <ToastContainer toast={toast} onDismiss={dismissToast} />
 
@@ -136,7 +166,7 @@ export function StudentDashboard() {
                 Terminal ID
               </div>
               <div className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>
-                j.doe@runa.edu.ph
+                {studentId || "—"}
               </div>
             </div>
             <button
@@ -152,13 +182,13 @@ export function StudentDashboard() {
                 style={{ background: "#111d30", minWidth: "160px" }}
               >
                 <div className="px-4 py-3 border-b border-[#1a2640]">
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "11px" }}>John Doe</p>
-                  <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>j.doe@runa.edu.ph</p>
+                  <p className="text-[#c5d5ea]" style={{ fontSize: "11px" }}>{studentDisplayName}</p>
+                  <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>{studentId}</p>
                 </div>
                 <button
                   className="w-full flex items-center gap-2 px-4 py-3 text-left text-[#e05c6a] hover:bg-[#1e2e48] transition-colors"
                   style={{ fontSize: "11px", fontFamily: MONO }}
-                  onClick={() => navigate("/")}
+                  onClick={handleLogout}
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -200,7 +230,7 @@ export function StudentDashboard() {
       <div className="h-[1px] bg-[#1a2640]" />
 
       {/* ── MAIN BODY ── */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* ── LEFT SIDEBAR — App icons ── */}
         <aside
           className="flex flex-col items-center pt-4 pb-3 gap-1 border-r border-[#1a2640] shrink-0"
@@ -230,26 +260,8 @@ export function StudentDashboard() {
         </aside>
 
         {/* ── CENTER CONTENT ── */}
-        <main className="flex-1 overflow-y-auto relative">
-          <AppContent activeApp={activeApp} />
-
-          {/* System log notification */}
-          <div className="absolute bottom-4 left-4 z-10 pointer-events-none">
-            <div
-              className="flex gap-3 p-4 rounded-sm border border-[#1a2640]"
-              style={{ background: "rgba(17,29,48,0.92)", maxWidth: "300px" }}
-            >
-              <div className="w-2 h-2 rounded-full mt-1 shrink-0" style={{ background: "#3a6fff" }} />
-              <div>
-                <p className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO, lineHeight: 1.5 }}>
-                  System Policy: Persistent storage is disabled for this session.
-                </p>
-                <p className="text-[#2e4060] mt-1" style={{ fontSize: "10px", fontFamily: MONO }}>
-                  System Log {now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                </p>
-              </div>
-            </div>
-          </div>
+        <main className="flex-1 min-h-0 overflow-y-auto relative">
+          <AppContent activeApp={activeApp} studentId={studentId || "student@runa.edu.ph"} />
         </main>
 
         {/* ── RIGHT PANEL ── */}

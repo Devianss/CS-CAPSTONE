@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Shield, Fingerprint, Lock, ArrowRight, ArrowLeft } from "lucide-react";
+import { useElectron } from "../ipc/useElectron";
+import { DEMO_USERS } from "../auth/demoUsers";
 
 const MONO = "'Share Tech Mono', monospace";
 const BRAND = "'Orbitron', sans-serif";
@@ -54,8 +56,11 @@ function CornerBracket({ position }: { position: string }) {
 
 const CODE_LENGTH = 6;
 
+const ACCESS_SESSION_MS = 8 * 60 * 60 * 1000;
+
 export function AccessCodePage() {
   const navigate = useNavigate();
+  const sessionApi = useElectron().session;
   const [code, setCode] = useState<string[]>(Array(CODE_LENGTH).fill(""));
   const [error, setError] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
@@ -109,19 +114,32 @@ export function AccessCodePage() {
     inputRefs.current[nextEmpty]?.focus();
   };
 
-  const handleValidate = (e: React.FormEvent) => {
+  const handleValidate = async (e: React.FormEvent) => {
     e.preventDefault();
     const filled = code.filter((c) => c !== "").length;
     if (filled < CODE_LENGTH) {
       setError(true);
       return;
     }
-    navigate("/dashboard");
+    const student = DEMO_USERS.find((u) => u.role === "student");
+    if (!student) {
+      setError(true);
+      return;
+    }
+    const now = Date.now();
+    await sessionApi.set({
+      userId: student.email,
+      role: "student",
+      token: `access-${crypto.randomUUID()}`,
+      persistent: false,
+      expiresAt: now + ACCESS_SESSION_MS,
+    });
+    navigate("/student-dashboard");
   };
 
   return (
     <div
-      className="min-h-screen w-full flex flex-col relative overflow-hidden"
+      className="h-full min-h-0 w-full flex flex-col relative overflow-hidden"
       style={{
         background: "#0d1320",
         fontFamily: "'Space Grotesk', sans-serif",

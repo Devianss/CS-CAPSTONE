@@ -1,16 +1,18 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import {
   Shield,
   Settings,
   Wifi,
-  X,
   User,
   Volume2,
   LayoutDashboard,
   Activity,
   ShieldCheck,
   FileText,
+  Bot,
+  Inbox,
+  AlertTriangle,
 } from "lucide-react";
 import { SettingsPanel } from "./SettingsPanel";
 import {
@@ -23,6 +25,12 @@ import { LabDashboardPanel } from "./LabDashboardPanel";
 import { LabMonitoringPanel } from "./LabMonitoringPanel";
 import { AccessControlPanel } from "./AccessControlPanel";
 import { AuditTrailsPanel } from "./AuditTrailsPanel";
+import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
+import { ApprovalsQueue } from "./agentic/ApprovalsQueue";
+import { RiskBadge } from "./agentic/RiskBadge";
+import { useElectron } from "../ipc/useElectron";
+import { findDemoUser } from "../auth/demoUsers";
+import { listPending, proposeAction } from "../agentic/approvalQueue";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
@@ -32,32 +40,69 @@ type NavItem = {
   id: string;
   label: string;
   icon: ReactNode;
+  badge?: number;
 };
 
-const navItems: NavItem[] = [
-  { id: "lab-dashboard",  label: "DASHBOARD",  icon: <LayoutDashboard size={20} /> },
+const navItems = (
+  pending: number,
+): NavItem[] => [
+  { id: "lab-dashboard", label: "DASHBOARD", icon: <LayoutDashboard size={20} /> },
   { id: "lab-monitoring", label: "MONITORING", icon: <Activity size={20} /> },
-  { id: "access-control", label: "ACCESS",     icon: <ShieldCheck size={20} /> },
-  { id: "audit-trails",   label: "AUDIT",      icon: <FileText size={20} /> },
+  { id: "access-control", label: "ACCESS", icon: <ShieldCheck size={20} /> },
+  { id: "audit-trails", label: "AUDIT", icon: <FileText size={20} /> },
+  { id: "assistant", label: "ASSISTANT", icon: <Bot size={20} /> },
+  {
+    id: "approvals",
+    label: "APPROVALS",
+    icon: <Inbox size={20} />,
+    badge: pending > 0 ? pending : undefined,
+  },
 ];
 
-function AdminContent({ active }: { active: string }) {
+function AdminContent({
+  active,
+  adminId,
+  onApprovalsChange,
+}: {
+  active: string;
+  adminId: string;
+  onApprovalsChange?: () => void;
+}) {
   switch (active) {
-    case "lab-monitoring": return <LabMonitoringPanel />;
-    case "access-control": return <AccessControlPanel />;
-    case "audit-trails":   return <AuditTrailsPanel />;
+    case "assistant":
+      return (
+        <div className="h-full min-h-0 p-4 box-border">
+          <ProductivityAssistant role="admin" userId={adminId} height="100%" />
+        </div>
+      );
+    case "approvals":
+      return (
+        <div className="h-full min-h-0 p-4 box-border">
+          <ApprovalsQueue currentAdminId={adminId} onChange={onApprovalsChange} />
+        </div>
+      );
+    case "lab-monitoring":
+      return <LabMonitoringPanel />;
+    case "access-control":
+      return <AccessControlPanel />;
+    case "audit-trails":
+      return <AuditTrailsPanel />;
     case "lab-dashboard":
-    default:               return <LabDashboardPanel />;
+    default:
+      return <LabDashboardPanel />;
   }
 }
 
 export function Dashboard() {
   const navigate = useNavigate();
+  const api = useElectron();
   const [activeNav, setActiveNav] = useState("lab-dashboard");
   const [now, setNow] = useState(new Date());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showSystemLog, setShowSystemLog] = useState(true);
+  const [adminId, setAdminId] = useState("");
+  const [adminDisplayName, setAdminDisplayName] = useState("System Administrator");
+  const [pendingCount, setPendingCount] = useState(0);
   const {
     notifications,
     toast,
@@ -70,34 +115,71 @@ export function Dashboard() {
     dismissToast,
   } = useNotifications();
 
+  const refreshPending = useCallback(async () => {
+    try {
+      const p = await listPending();
+      setPendingCount(p.length);
+    } catch {
+      setPendingCount(0);
+    }
+  }, []);
+
   useEffect(() => {
-    const timer = setInterval(() => {
-      setNow(new Date());
-    }, 1000);
+    const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    (async () => {
+      const s = await api.session.get();
+      if (s?.userId) {
+        setAdminId(s.userId);
+        const u = findDemoUser(s.userId);
+        setAdminDisplayName(u?.displayName ?? s.userId);
+      }
+      await refreshPending();
+    })();
+  }, [api, refreshPending]);
 
   const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   const dateStr = now
     .toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
     .toUpperCase();
 
-  const activeLabel = navItems.find((n) => n.id === activeNav)?.label ?? "DASHBOARD";
+  const items = navItems(pendingCount);
+  const activeLabel = items.find((n) => n.id === activeNav)?.label ?? "DASHBOARD";
+
+  const handleLogout = async () => {
+    await api.session.clear();
+    navigate("/");
+  };
+
+  const triggerHigh = async (type: "wipe_terminal" | "lock_cluster") => {
+    if (!adminId) return;
+    await proposeAction(
+      {
+        type,
+        scope: "lab",
+        reversible: false,
+        payload: { source: "dev_trigger" },
+        confidence: 0.9,
+        reasoning: `Dev-only staging trigger (${type})`,
+      },
+      adminId,
+      "admin",
+    );
+    await refreshPending();
+  };
 
   return (
-    <div className="flex flex-col min-h-screen" style={{ background: "#0d1320", fontFamily: GROTESK }}>
-      {/* Settings overlay */}
+    <div className="flex flex-col h-full min-h-0" style={{ background: "#0d1320", fontFamily: GROTESK }}>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-
-      {/* Toast */}
       <ToastContainer toast={toast} onDismiss={dismissToast} />
 
-      {/* ── TOP NAVBAR ── */}
       <header
         className="flex items-center justify-between px-5 h-14 border-b border-[#1a2640] shrink-0"
         style={{ background: "#0f1828" }}
       >
-        {/* Left: Logo + role badge */}
         <div className="flex items-center gap-5">
           <span className="text-[#7eb5f5]" style={{ fontSize: "16px", fontFamily: BRAND, letterSpacing: "0.12em" }}>
             RUNA
@@ -110,9 +192,7 @@ export function Dashboard() {
           </div>
         </div>
 
-        {/* Right: Admin ID + Icons */}
         <div className="flex items-center gap-4">
-          {/* Admin ID */}
           <div
             className="relative flex items-center gap-2 border border-[#1e2e48] rounded-sm px-3 py-1.5"
             style={{ background: "#111d30" }}
@@ -122,7 +202,7 @@ export function Dashboard() {
                 Admin ID
               </div>
               <div className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>
-                admin@runa.edu.ph
+                {adminId || "—"}
               </div>
             </div>
             <button
@@ -133,21 +213,19 @@ export function Dashboard() {
               <User size={16} className="text-[#c5d5ea]" />
             </button>
 
-            {/* Dropdown */}
             {showUserMenu && (
               <div
                 className="absolute top-full right-0 mt-2 rounded-sm border border-[#2a3a55] overflow-hidden z-50"
                 style={{ background: "#111d30", minWidth: "160px" }}
               >
-                {/* Profile row */}
                 <div className="px-4 py-3 border-b border-[#1a2640]">
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "11px" }}>System Administrator</p>
-                  <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>admin@runa.edu.ph</p>
+                  <p className="text-[#c5d5ea]" style={{ fontSize: "11px" }}>{adminDisplayName}</p>
+                  <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>{adminId}</p>
                 </div>
                 <button
                   className="w-full flex items-center gap-2 px-4 py-3 text-left text-[#e05c6a] hover:bg-[#1e2e48] transition-colors"
                   style={{ fontSize: "11px", fontFamily: MONO }}
-                  onClick={() => navigate("/")}
+                  onClick={handleLogout}
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -160,7 +238,6 @@ export function Dashboard() {
             )}
           </div>
 
-          {/* Notification Bell */}
           <div className="relative">
             <NotificationBell notifications={notifications} onOpen={() => setShowPanel((v) => !v)} />
             {showPanel && (
@@ -175,7 +252,6 @@ export function Dashboard() {
             )}
           </div>
 
-          {/* Settings */}
           <button
             className="w-8 h-8 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5] transition-colors"
             title="Settings"
@@ -186,23 +262,20 @@ export function Dashboard() {
         </div>
       </header>
 
-      {/* Accent line */}
       <div className="h-[1px] bg-[#1a2640]" />
 
-      {/* ── MAIN BODY ── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* ── LEFT SIDEBAR — Admin nav only ── */}
         <aside
           className="flex flex-col items-center pt-4 pb-3 gap-1 border-r border-[#1a2640] shrink-0"
           style={{ width: "88px", background: "#0a1120" }}
         >
-          {navItems.map((item) => {
+          {items.map((item) => {
             const isActive = activeNav === item.id;
             return (
               <button
                 key={item.id}
                 onClick={() => setActiveNav(item.id)}
-                className="flex flex-col items-center gap-1.5 py-3.5 w-full transition-all"
+                className="relative flex flex-col items-center gap-1.5 py-3.5 w-full transition-all"
                 style={{
                   background: isActive ? "#162035" : "transparent",
                   borderLeft: isActive ? "2px solid #3a6fff" : "2px solid transparent",
@@ -211,6 +284,14 @@ export function Dashboard() {
                 title={item.label}
               >
                 {item.icon}
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span
+                    className="absolute top-2 right-2 min-w-[14px] h-[14px] px-0.5 rounded-full flex items-center justify-center text-white"
+                    style={{ fontSize: "8px", fontFamily: MONO, background: "#e05c6a" }}
+                  >
+                    {item.badge > 9 ? "9+" : item.badge}
+                  </span>
+                )}
                 <span className="tracking-widest" style={{ fontSize: "7px", fontFamily: MONO }}>
                   {item.label}
                 </span>
@@ -219,19 +300,20 @@ export function Dashboard() {
           })}
         </aside>
 
-        {/* ── CENTER + ADMIN DASH ── */}
-        <main className="flex-1 min-h-0 relative overflow-hidden">
-          <div className="flex h-full min-h-0 overflow-y-auto">
+        <main className="flex-1 min-h-0 relative overflow-hidden flex flex-col">
+          <div className="flex flex-1 min-h-0 overflow-y-auto">
             <div className="flex-1 min-h-0">
-              <AdminContent active={activeNav} />
+              <AdminContent
+                active={activeNav}
+                adminId={adminId || "admin@runa.edu.ph"}
+                onApprovalsChange={refreshPending}
+              />
             </div>
 
-            {/* ── ADMIN DASH PANEL ── */}
             <aside
               className="flex flex-col border-l border-[#1a2640] shrink-0 py-5 px-4 gap-6 overflow-y-auto min-h-0"
               style={{ width: "215px", background: "#0a1120" }}
             >
-              {/* Server Performance */}
               <div>
                 <div className="flex items-center justify-between mb-4">
                   <span className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
@@ -261,7 +343,6 @@ export function Dashboard() {
 
               <div className="h-[1px] bg-[#1a2640]" />
 
-              {/* Connection Status */}
               <div>
                 <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
                   Network
@@ -278,7 +359,6 @@ export function Dashboard() {
 
               <div className="h-[1px] bg-[#1a2640]" />
 
-              {/* Active View */}
               <div>
                 <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
                   Active View
@@ -296,7 +376,6 @@ export function Dashboard() {
 
               <div className="h-[1px] bg-[#1a2640]" />
 
-              {/* Admin Role Badge */}
               <div>
                 <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
                   Privilege Level
@@ -309,46 +388,55 @@ export function Dashboard() {
                   Full system privileges
                 </p>
               </div>
+
+              {import.meta.env.DEV && (
+                <>
+                  <div className="h-[1px] bg-[#1a2640]" />
+                  <div>
+                    <span className="block text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>
+                      Agentic preview
+                    </span>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      <RiskBadge tier="low" compact />
+                      <RiskBadge tier="medium" compact />
+                      <RiskBadge tier="high" compact />
+                    </div>
+                    <p className="text-[#2a3a55] mb-2" style={{ fontSize: "9px", fontFamily: MONO }}>
+                      Queue HIGH-risk proposals for HITL demo.
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={() => triggerHigh("wipe_terminal")}
+                        className="w-full py-2 rounded border border-[#e05c6a40] text-[#e05c6a] hover:bg-[#e05c6a15] text-left px-2"
+                        style={{ fontSize: "9px", fontFamily: MONO }}
+                      >
+                        <AlertTriangle size={12} className="inline mr-1 align-text-bottom" />
+                        Trigger wipe_terminal
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => triggerHigh("lock_cluster")}
+                        className="w-full py-2 rounded border border-[#e8821a40] text-[#e8821a] hover:bg-[#e8821a15] text-left px-2"
+                        style={{ fontSize: "9px", fontFamily: MONO }}
+                      >
+                        Trigger lock_cluster
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </aside>
           </div>
-
-          {/* System log notification */}
-          {showSystemLog && (
-            <div className="absolute bottom-4 left-4 z-10 pointer-events-auto">
-              <div
-                className="relative flex gap-3 p-4 rounded-sm border border-[#1a2640]"
-                style={{ background: "rgba(17,29,48,0.92)", maxWidth: "320px" }}
-              >
-                <button
-                  className="absolute top-2 right-2 text-[#4a6080] hover:text-[#c5d5ea]"
-                  onClick={() => setShowSystemLog(false)}
-                  aria-label="Close system log"
-                >
-                  <X size={14} />
-                </button>
-                <div className="w-2 h-2 rounded-full mt-1 shrink-0" style={{ background: "#3a6fff" }} />
-                <div>
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO, lineHeight: 1.5 }}>
-                    Admin Policy: All actions are logged and audited per RUNA security protocol.
-                  </p>
-                  <p className="text-[#2e4060] mt-1" style={{ fontSize: "10px", fontFamily: MONO }}>
-                    System Log {now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
         </main>
       </div>
 
-      {/* ── BOTTOM TASKBAR ── */}
       <footer
         className="flex items-center justify-between px-5 h-11 border-t border-[#1a2640] shrink-0"
         style={{ background: "#0f1828" }}
       >
-        {/* Left: Admin nav dock */}
         <div className="flex items-center gap-1">
-          {navItems.map((item) => (
+          {items.map((item) => (
             <button
               key={item.id}
               onClick={() => setActiveNav(item.id)}
@@ -359,6 +447,14 @@ export function Dashboard() {
               <span style={{ display: "flex", transform: "scale(0.72)", transformOrigin: "center" }}>
                 {item.icon}
               </span>
+              {item.badge !== undefined && item.badge > 0 && (
+                <span
+                  className="absolute top-0 right-1 min-w-[12px] h-[12px] rounded-full flex items-center justify-center text-white"
+                  style={{ fontSize: "7px", background: "#e05c6a" }}
+                >
+                  {item.badge > 9 ? "+" : item.badge}
+                </span>
+              )}
               {activeNav === item.id && (
                 <div
                   className="absolute bottom-0 left-1/2 -translate-x-1/2 w-5 h-[2px] rounded-full"
@@ -369,7 +465,6 @@ export function Dashboard() {
           ))}
         </div>
 
-        {/* Right: admin tag + volume + time */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5 text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
             <Shield size={11} />

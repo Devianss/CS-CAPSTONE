@@ -2,14 +2,10 @@
  * preload.ts
  *
  * Runs in the renderer context but with access to Node/Electron APIs.
- * Exposes a typed, safe API surface via contextBridge so the React app
- * never touches raw IPC or Node directly.
+ * Exposes a typed, safe API surface via contextBridge.
  */
 import { contextBridge, ipcRenderer } from "electron";
 
-// ─────────────────────────────────────────────
-//  Types (shared with renderer via @/types/electron.d.ts)
-// ─────────────────────────────────────────────
 type Role = "student" | "admin";
 
 interface SessionPayload {
@@ -32,11 +28,26 @@ interface PythonResult<T = unknown> {
   error?: string;
 }
 
-// ─────────────────────────────────────────────
-//  Exposed API — window.electronAPI
-// ─────────────────────────────────────────────
+type ActorRole = Role | "system" | "agent";
+
+type RiskTier = "low" | "medium" | "high";
+
+interface AgentActionPayload {
+  type: string;
+  scope: string;
+  reversible: boolean;
+  payload: Record<string, unknown>;
+  confidence?: number;
+  reasoning: string;
+}
+
+interface ApprovalEvidencePayload {
+  scanResult?: unknown;
+  aiConfidence?: number;
+  sourceAlert?: string;
+}
+
 const api = {
-  // Session
   session: {
     get: (): Promise<SessionPayload | null> =>
       ipcRenderer.invoke("session:get"),
@@ -45,51 +56,87 @@ const api = {
     clear: (): Promise<boolean> => ipcRenderer.invoke("session:clear"),
   },
 
-  // Settings
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),
     set: (partial: Partial<AppSettings>): Promise<AppSettings> =>
       ipcRenderer.invoke("settings:set", partial),
   },
 
-  // Window controls (custom titlebar)
   window: {
     minimize: () => ipcRenderer.invoke("window:minimize"),
     maximize: () => ipcRenderer.invoke("window:maximize"),
     close: () => ipcRenderer.invoke("window:close"),
   },
 
-  // Python microservice
   python: {
     call: <T = unknown>(
       endpoint: string,
-      payload?: unknown
+      payload?: unknown,
     ): Promise<PythonResult<T>> =>
       ipcRenderer.invoke("python:call", endpoint, payload),
   },
 
-  // File dialog
   dialog: {
     openFile: (
-      filters?: { name: string; extensions: string[] }[]
+      filters?: { name: string; extensions: string[] }[],
     ): Promise<string | null> =>
       ipcRenderer.invoke("dialog:openFile", filters),
   },
 
-  // Tray notifications
   tray: {
     notify: (title: string, body: string): void => {
       ipcRenderer.invoke("tray:notify", title, body);
     },
   },
 
-  // App info
   app: {
     version: (): Promise<string> => ipcRenderer.invoke("app:version"),
     platform: (): Promise<string> => ipcRenderer.invoke("app:platform"),
   },
 
-  // Listen for main → renderer events (e.g., navigate, notifications)
+  audit: {
+    log: (args: {
+      eventType: string;
+      detail: string;
+      actorUserId: string;
+      actorRole: ActorRole;
+      approvalId?: string;
+      approverUserId?: string;
+      riskTier?: RiskTier;
+      confidenceScore?: number;
+    }): Promise<boolean> => ipcRenderer.invoke("audit:log", args),
+    list: (limit?: number): Promise<unknown[]> =>
+      ipcRenderer.invoke("audit:list", limit),
+  },
+
+  agent: {
+    propose: (args: {
+      action: AgentActionPayload;
+      requesterId: string;
+      requesterRole: Role;
+      evidence?: ApprovalEvidencePayload;
+    }): Promise<unknown> => ipcRenderer.invoke("agent:propose", args),
+    listPending: (): Promise<unknown[]> =>
+      ipcRenderer.invoke("agent:list-pending"),
+    listHistory: (limit?: number): Promise<unknown[]> =>
+      ipcRenderer.invoke("agent:list-history", limit),
+    approve: (args: {
+      id: string;
+      approverUserId: string;
+      comment?: string;
+    }): Promise<unknown> => ipcRenderer.invoke("agent:approve", args),
+    reject: (args: {
+      id: string;
+      approverUserId: string;
+      comment?: string;
+    }): Promise<unknown> => ipcRenderer.invoke("agent:reject", args),
+    requestInfo: (args: {
+      id: string;
+      byUserId: string;
+      text: string;
+    }): Promise<unknown> => ipcRenderer.invoke("agent:request-info", args),
+  },
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const validChannels = ["navigate", "notification:push", "usb:event"];
     if (validChannels.includes(channel)) {
@@ -102,5 +149,3 @@ const api = {
 };
 
 contextBridge.exposeInMainWorld("electronAPI", api);
-
-// TypeScript declaration merged in src/types/electron.d.ts

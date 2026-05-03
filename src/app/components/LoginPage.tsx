@@ -1,26 +1,64 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { Shield, AtSign, Lock, KeyRound, LogIn, GraduationCap, ShieldCheck } from "lucide-react";
+import {
+  Shield,
+  AtSign,
+  Lock,
+  KeyRound,
+  LogIn,
+  GraduationCap,
+  ShieldCheck,
+  AlertTriangle,
+} from "lucide-react";
+import { authenticate } from "../auth/demoUsers";
+import { useElectron } from "../ipc/useElectron";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
 const BRAND = "'Orbitron', sans-serif";
 
-type Role = "student" | "admin";
+const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
+
+type Role = ElectronRole;
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const sessionApi = useElectron().session;
   const [role, setRole] = useState<Role>("student");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [persistent, setPersistent] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSignIn = (e: React.FormEvent) => {
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (role === "admin") {
-      navigate("/dashboard");
-    } else {
-      navigate("/student-dashboard");
+    setLoginError(null);
+    setSubmitting(true);
+    try {
+      const user = authenticate(email, password);
+      if (!user) {
+        setLoginError("Invalid email or password.");
+        return;
+      }
+      if (user.role !== role) {
+        setLoginError(
+          `This account is a ${user.role === "admin" ? "admin" : "student"} account. Switch the tab above.`,
+        );
+        return;
+      }
+      const now = Date.now();
+      const expiresAt = persistent ? now + SESSION_DURATION_MS * 365 : now + SESSION_DURATION_MS;
+      await sessionApi.set({
+        userId: user.email,
+        role: user.role,
+        token: `demo-${crypto.randomUUID()}`,
+        persistent,
+        expiresAt,
+      });
+      navigate(user.role === "admin" ? "/dashboard" : "/student-dashboard");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -28,7 +66,7 @@ export function LoginPage() {
 
   return (
     <div
-      className="min-h-screen w-full flex flex-col relative overflow-hidden"
+      className="h-full w-full flex flex-col relative overflow-hidden min-h-0"
       style={{ background: "#0d1320", fontFamily: GROTESK }}
     >
       {/* Corner brackets */}
@@ -195,6 +233,15 @@ export function LoginPage() {
                   />
                   <Lock size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#2e4060]" />
                 </div>
+                {loginError && (
+                  <div
+                    className="mt-2 flex items-start gap-2 text-[#e05c6a]"
+                    style={{ fontSize: "10px", fontFamily: MONO }}
+                  >
+                    <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                    <span>{loginError}</span>
+                  </div>
+                )}
               </div>
 
               {/* Persistent session + Recovery */}
@@ -222,7 +269,8 @@ export function LoginPage() {
               {/* Sign In button */}
               <button
                 type="submit"
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-sm tracking-widest uppercase transition-all hover:opacity-90 active:scale-[0.98]"
+                disabled={submitting}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-sm tracking-widest uppercase transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50"
                 style={{
                   background: isAdmin ? "#e8821a" : "#c5d5ea",
                   color: isAdmin ? "#0d1320" : "#0d1320",
@@ -230,7 +278,7 @@ export function LoginPage() {
                   fontFamily: MONO,
                 }}
               >
-                {isAdmin ? "Admin Sign In" : "Sign In"}
+                {submitting ? "Signing in…" : isAdmin ? "Admin Sign In" : "Sign In"}
                 <LogIn size={14} />
               </button>
 
