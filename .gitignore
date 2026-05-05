@@ -1,9 +1,16 @@
 node_modules
 
+.env
+python-service/.env
+python-service/__pycache__/
+python-service/*.pyc
+
 dist/
 dist-electron/
 
 release/
 
+digest.txt
+src/digest.txt
 # Windows accidental artifact
 nul

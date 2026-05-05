@@ -18,6 +18,18 @@ Tick boxes as you go. Each day ends when its **Exit Criterion** passes. If you c
 
 Granular unchecked boxes in older day sections are **archival**; use the table above plus each day’s **exit criterion** for gating.
 
+### Sprint lock (2026-05-05)
+
+- [x] Objective locked: **defense demo polish, future-ready for production**.
+- [x] Non-negotiable flows locked: **USB scan**, **productivity assistant**, **malicious/blocked-site enforcement**.
+- [x] Sensitive action rule locked: unimplemented HIGH/MEDIUM paths must **hard-fail clearly** (no fake success).
+- [x] MEDIUM actions use **HITL** for this sprint.
+- [x] Demo role split locked: **student proposes on one device, admin approves on another**.
+- [x] Student right pane direction locked: **compact control tower + drawer/collapse on small windows**.
+- [x] User feedback locked: severity-coded toasts/warnings are mandatory.
+- [x] Persistence locked to **electron-store** for sprint speed.
+- [x] Process locked: **direct to main**, cleanup deferred, ship fast.
+
 ---
 
 ## Day 1 — Foundation (Make it boot as a desktop app)
@@ -147,7 +159,7 @@ git tag day-1-green
 ### Morning (≈ 2 h) — Sidecar boot
 - [ ] Re-enable `startPythonService()` in `electron/main.ts`.
 - [ ] Verify `python --version` runs in the same shell that runs `npm run dev`. If not → swap to `py` or absolute path.
-- [ ] Install Python deps: `cd python-service && pip install flask boto3 python-clamd watchdog requests pyusb && cd ..`. (clamd / pyusb may fail to import — that's fine.)
+- [ ] Install Python deps: `cd python-service && pip install flask groq boto3 python-clamd watchdog requests pyusb && cd ..`. (clamd / pyusb may fail to import — that's fine.)
 - [ ] Launch `npm run dev` — Python service should print `[python] PCU Lab Portal service starting on port 5001` in the Electron terminal.
 - [ ] Hit `http://localhost:5001/health` from a browser → JSON response.
 
@@ -155,7 +167,7 @@ git tag day-1-green
 - [ ] Extend `python:call` IPC handler in `main.ts` to support GET — needed for `/health` and `/usb-list`.
 - [ ] Build `<HealthDot />` and mount it in the admin TopBar (§3.3).
 - [ ] Wire `<ProductivityAssistant />` to call real `/ai-task` with `{prompt, role, tools}` (§6.9). 5s timeout falls back to a labeled static response.
-- [ ] Extend `python-service/service.py` `/ai-task` to accept role + tools and build a Bedrock call if creds present, else canned response.
+- [ ] Extend `python-service/service.py` `/ai-task` to accept role + tools and build a Groq call if API key is present, else canned response.
 - [ ] Add the **Run File Scan** action (§3.4):
   - [ ] Tile in `AccessControlPanel.tsx` next to "Lock Cluster".
   - [ ] Click → file picker → POST to `/scan-file` → toast.
@@ -186,7 +198,7 @@ git tag day-1-green
 - [ ] Run File Scan on EICAR → threat detected + `action_proposed` queued.
 - [ ] Open Approvals Queue → approve → action_executed row appears.
 - [ ] Close + reopen app → all rows still there, queue still there.
-- [ ] Send "Summarize today's audit" to admin Assistant → real Bedrock (or labeled static) response.
+- [ ] Send "Summarize today's audit" to admin Assistant → real Groq (or labeled static) response.
 - [ ] USB sub-panel shows devices currently plugged in.
 - [ ] Commit + tag `day-3-green`.
 
@@ -196,14 +208,14 @@ git tag day-1-green
 - **Health poll:** UI uses **5s** interval (doc previously said 10s — both acceptable).
 - **Toasts:** **Sonner** `<Toaster />` in `App.tsx` for scan flows; legacy in-dashboard notifications unchanged.
 - **Audit Trails:** **RUNA agent / HITL log** tab calls `audit.list`; institutional attendance table remains **synthetic** for visuals until Tier 1 de-randomization (Day 4 carry-over).
-- **Bedrock:** defense laptop expected to have creds (`stakeholder-decisions.md`); service returns **`local_fallback`** when AWS errors.
+- **Groq:** defense laptop expected to have `GROQ_API_KEY` (`stakeholder-decisions.md`); service returns **`local_fallback`** when provider errors.
 - **Next sprint hook:** replace `executeAction` stub with **production-level** behavior; add **polished** “Simulate USB” (not dev-only).
 
 ---
 
 ## Day 4 — Canonical Demo Flow + Governance
 
-**Exit criterion:** Canonical USB scenario from `agentic-architecture.md` §7 runs end-to-end without code edits. PLUS 7+/9 of the Definition-of-Done items in §13 pass.
+**Exit criterion:** Canonical USB + blocked-site scenarios run end-to-end without code edits, with separate proposer/approver devices and truthful execution outcomes. PLUS 7+/9 of the Definition-of-Done items in §13 pass.
 
 > Cross-reference: `steps.md` §6.12–§6.16 (Action Timeline + scenario orchestrator + override-via-queue + governance + HITL audit), §4 (carry-over Tier 1 polish + scheduling).
 
@@ -211,15 +223,18 @@ git tag day-1-green
 - [ ] Build `<ActionTimeline />` (`steps.md` §6.12). Renders three labeled stages with timestamps.
 - [ ] Add `AgenticEventBus` context in `src/app/agentic/eventBus.tsx` so the orchestrator can push events without prop-drilling.
 - [ ] Build `src/app/agentic/scenarios/usbInsertion.ts` orchestrator (§6.13).
+- [ ] Build blocked-site orchestrator (`src/app/agentic/scenarios/blockedSite.ts` or equivalent) with **actual enforcement** path.
 - [ ] Mount `<ActionTimeline />` on the student dashboard as a slide-up panel triggered by the first perception event.
-- [ ] Add stage **Simulate USB** button (admin-side, dev-only) that dispatches a fake `usb-inserted` event for fallback when hardware fails.
+- [ ] Add stage **Simulate USB** control (admin-side, production-grade UX) that dispatches a fake `usb-inserted` event for fallback when hardware fails.
 
 ### Midday (≈ 3 h) — Override actions through the queue
 - [ ] Add `policy:get` and `policy:set` IPC handlers + preload + typings.
 - [ ] Refactor **Lock Cluster** confirm modal to call `proposeAction` (HIGH) instead of direct policy.set (§6.14). Action handler in main executes `policy.set` only on approval.
 - [ ] Same for **Terminate All Sessions**.
 - [ ] Same for **WIPE TERMINAL** alert button on `LabMonitoringPanel`.
-- [ ] **Kiosk Mode** toggle (Settings) — auto-execute MEDIUM with audit row (§6.14 footer).
+- [ ] **Kiosk Mode** toggle (Settings) — route MEDIUM through **HITL** with audit row.
+- [ ] Enforce "truthfulness": remove/guard stub success returns for sensitive actions; hard-fail with explicit error/toast when not implemented.
+- [ ] Validate student proposer vs admin approver identity chain in queue + audit on two devices.
 - [ ] Add `globalShortcut` `Ctrl+Shift+K` escape hatch in `main.ts`. **Test it.**
 
 ### Afternoon (≈ 3 h) — Governance affordances + Tier 1 polish
@@ -228,6 +243,8 @@ git tag day-1-green
 - [ ] Add **Data Minimization** tooltip near Audit Trails Export (§6.15.3).
 - [ ] Add scope statement banner above Productivity Assistant chat input (§6.15.4).
 - [ ] Add **Privacy** sub-tab to `SettingsPanel.tsx` per §6.15.5.
+- [ ] Implement severity-coded user feedback across flows (info/success/warn/error) for student + admin.
+- [ ] Convert student right panel to **drawer/collapse on small viewports** while keeping compact control-tower content.
 - [ ] Lift `useNotifications` into a Context provider in `App.tsx` (§4.7).
 - [ ] Add student session expiry hard-stop (§4.6).
 - [ ] Replace random data in `LabDashboardPanel`, `LabMonitoringPanel`, `AccessControlPanel` with deterministic `STATIC_GRIDS` (§4.1).
@@ -242,7 +259,7 @@ git tag day-1-green
 - [ ] Commit + tag `day-4-green`.
 
 ### Found during dry run
-- (e.g. "Action Timeline races on cold boot", "Bedrock latency too long without spinner", "Approval queue refresh lag", …)
+- (e.g. "Action Timeline races on cold boot", "Groq latency too long without spinner", "Approval queue refresh lag", …)
 - ...
 
 ---

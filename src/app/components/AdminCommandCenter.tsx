@@ -58,7 +58,7 @@ const SERVICES = [
   { name: "ClamAV Engine", status: "online" as const, icon: Shield },
   { name: "Python Sidecar", status: "online" as const, icon: Cpu },
   { name: "USB Monitor", status: "online" as const, icon: Usb },
-  { name: "AWS Bedrock", status: "degraded" as const, icon: Cloud },
+  { name: "Groq Inference", status: "degraded" as const, icon: Cloud },
   { name: "SQLite DB", status: "online" as const, icon: Database },
 ];
 

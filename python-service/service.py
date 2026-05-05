@@ -9,11 +9,11 @@ Endpoints
   POST /scan-file     → ClamAV file scan
   POST /scan-usb      → USB device enumeration + scan
   POST /analyze-url   → URL reputation check
-  POST /ai-task       → Amazon Bedrock (Claude 3.5 Sonnet) invocation
+  POST /ai-task       → Groq chat completion invocation
   GET  /health        → liveness check
 
 Install dependencies:
-  pip install flask boto3 python-clamd watchdog requests
+  pip install flask groq boto3 python-clamd watchdog requests
 
 Run standalone:
   FLASK_PORT=5001 python service.py
@@ -22,26 +22,26 @@ Run standalone:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import threading
 import time
 from pathlib import Path
 
-import boto3
+import boto3  # pyright: ignore[reportMissingImports]
 from flask import Flask, jsonify, request
+from groq import Groq  # pyright: ignore[reportMissingImports]
 
 # Optional: install python-clamd for real ClamAV support
 try:
-    import clamd
+    import clamd  # pyright: ignore[reportMissingImports]
     CLAMD_AVAILABLE = True
 except ImportError:
     CLAMD_AVAILABLE = False
 
 # Optional: install usb-monitor for real USB hooks
 try:
-    import usb.core  # pyusb
+    import usb.core  # pyright: ignore[reportMissingImports]  # pyusb
     USB_AVAILABLE = True
 except ImportError:
     USB_AVAILABLE = False
@@ -49,9 +49,19 @@ except ImportError:
 # ─────────────────────────────────────────────
 #  Configuration
 # ─────────────────────────────────────────────
+env_file = Path(__file__).parent / ".env"
+if env_file.exists():
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
 PORT = int(os.environ.get("FLASK_PORT", 5001))
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-BEDROCK_MODEL = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "groq")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 logging.basicConfig(level=logging.INFO, format="[service] %(message)s")
 log = logging.getLogger(__name__)
@@ -62,10 +72,10 @@ app = Flask(__name__)
 EICAR_MARKER = b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE"
 
 AI_OFFLINE_FALLBACK = (
-    "The AI sidecar is running, but Amazon Bedrock could not be reached from this machine "
-    "(missing AWS credentials, network policy, or model access). This is a labeled offline response — "
-    "your message was still received. For the thesis demo, configure AWS CLI credentials with "
-    "Bedrock invoke permissions, or continue using keyword-based stubs in the UI."
+    "The AI sidecar is running, but the Groq service could not be reached from this machine "
+    "(missing API key, network policy, or provider access). This is a labeled offline response — "
+    "your message was still received. For the thesis demo, configure GROQ_API_KEY, "
+    "or continue using keyword-based stubs in the UI."
 )
 
 
@@ -108,16 +118,16 @@ def _enumerate_usb_devices() -> list[dict]:
 # ─────────────────────────────────────────────
 #  AWS clients (lazy-init so startup is fast)
 # ─────────────────────────────────────────────
-_bedrock = None
+_groq_client = None
 _dynamodb = None
 _s3 = None
 
 
-def bedrock_client():
-    global _bedrock
-    if _bedrock is None:
-        _bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-    return _bedrock
+def get_groq_client():
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    return _groq_client
 
 
 def dynamodb_client():
@@ -222,51 +232,91 @@ def analyze_url():
 
 
 # ─────────────────────────────────────────────
-#  /ai-task  – Amazon Bedrock (Claude 3.5 Sonnet)
+#  /ai-task  – Groq (legacy history format compatibility)
 # ─────────────────────────────────────────────
 @app.post("/ai-task")
 def ai_task():
     body = request.get_json(force=True)
     prompt: str = body.get("prompt", "")
-    system: str = body.get("system", "You are a helpful lab management assistant for PCU Lab Portal.")
-    max_tokens: int = body.get("max_tokens", 1024)
+    system_override: str = body.get("system", "")
+    max_tokens: int = body.get("maxTokens", body.get("max_tokens", 1024))
     role: str = body.get("role", "student")
     tools = body.get("tools") or []
+    history = body.get("history") or []
+    temperature: float = body.get("temperature", 0.3)
 
     if not prompt:
         return jsonify(ok=False, error="prompt required"), 400
 
+    if AI_PROVIDER.lower() != "groq":
+        return jsonify(
+            ok=True,
+            response=AI_OFFLINE_FALLBACK,
+            source="local_fallback",
+            detail=f"Unsupported AI_PROVIDER={AI_PROVIDER!r}; expected 'groq'.",
+        )
+
+    if not system_override:
+        system_override = (
+            "You are Runa, a bounded assistant for CS students in the PCU lab."
+            if role == "student"
+            else "You are Runa, a bounded operational assistant for PCU lab administrators."
+        )
+
     tool_hint = ""
     if isinstance(tools, list) and tools:
-        tool_hint = f"\n\nRegistered tool ids for this session: {', '.join(str(t) for t in tools)}."
+        tool_hint = f"\n\nTool ids for this session: {', '.join(str(t) for t in tools)}."
 
-    full_system = f"{system}{tool_hint}\n\nUser role tag: {role}."
+    full_system = f"{system_override}{tool_hint}\nrole: {role}."
+
+    messages = []
+    groq_messages = [{"role": "system", "content": full_system}]
+    for h in history:
+        if isinstance(h, dict) and h.get("role") in ("user", "assistant"):
+            content = h.get("content", [])
+            if isinstance(content, str):
+                content = [{"text": content}]
+            if isinstance(content, list):
+                messages.append({"role": h["role"], "content": content})
+                normalized = " ".join(
+                    block.get("text", "").strip()
+                    for block in content
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                ).strip()
+                if normalized:
+                    groq_messages.append({"role": h["role"], "content": normalized})
+    messages.append({"role": "user", "content": [{"text": prompt}]})
+    groq_messages.append({"role": "user", "content": prompt})
 
     try:
-        payload = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "system": full_system,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        response = bedrock_client().invoke_model(
-            modelId=BEDROCK_MODEL,
-            body=json.dumps(payload),
-            contentType="application/json",
-            accept="application/json",
+        response = get_groq_client().chat.completions.create(
+            model=GROQ_MODEL,
+            messages=groq_messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
-        result = json.loads(response["body"].read())
-        text = result["content"][0]["text"]
-        log.info("ai-task completed (%d chars)", len(text))
+        choice = response.choices[0] if response.choices else None
+        text = ((choice.message.content if choice and choice.message else "") or "").strip()
+        if not text:
+            text = "No response content from model."
+        usage = response.usage
+        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", input_tokens + output_tokens) or 0)
+        updated_history = messages + [{"role": "assistant", "content": [{"text": text}]}]
+        log.info("ai-task completed (%d chars) via provider=groq model=%s", len(text), GROQ_MODEL)
         return jsonify(
             ok=True,
             response=text,
-            source="bedrock",
-            input_tokens=result["usage"]["input_tokens"],
+            source="groq",
+            model=GROQ_MODEL,
+            inputTokens=input_tokens,
+            outputTokens=output_tokens,
+            totalTokens=total_tokens,
+            updatedHistory=updated_history,
         )
-
     except Exception as e:
-        log.error("Bedrock error: %s", e)
+        log.error("Groq error: %s", e)
         # Always return 200 so the Electron shell can render a labeled fallback during demos.
         return jsonify(
             ok=True,

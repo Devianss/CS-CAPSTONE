@@ -19,7 +19,14 @@ Day 4  ─── Demo Flow + Governance ─────  Canonical USB flow, rea
 Day 5  ─── Build + Rehearse ───────────  Portable .exe (primary), dry runs, recovery
 ```
 
-**Stakeholder decisions (2026-05-03):** canonical USB-first demo, **real** post-approve execution, **real** governance copy, Bedrock on defense laptop, **production-grade** simulate-USB, **`.exe`** as Day 5 primary artifact — see [`stakeholder-decisions.md`](./stakeholder-decisions.md).
+**Stakeholder decisions (2026-05-03 + 2026-05-05 lock):** canonical USB-first demo, **real** post-approve execution, **real** blocked-site enforcement, **MEDIUM + HIGH through HITL** for this sprint, proposer/approver on separate devices, compact right-rail with drawer/collapse behavior, Groq on defense laptop, **`.exe`** as Day 5 primary artifact — see [`stakeholder-decisions.md`](./stakeholder-decisions.md).
+
+### Locked sprint mode (2026-05-05)
+
+- **Objective:** defense demo polish, future-ready for production.
+- **Delivery style:** direct-to-main, ship fast, cleanup deferred.
+- **Truthfulness rule:** no fake success on unimplemented sensitive actions; hard-fail with clear user/admin feedback.
+- **Role separation:** demo must visibly show student proposes / admin approves on different devices.
 
 Each day has a single **non-negotiable exit criterion**. If a day's exit criterion is not met, **do not start the next day's work** — fall back to the corresponding branch in `decision-tree.md` and either (a) cut scope or (b) carry the gap into a documented limitation.
 
@@ -71,7 +78,7 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 **(1)** A student logs in, opens the Productivity Assistant, sends a message, gets a response with a LOW RiskBadge. **(2)** A test "trigger HIGH action" button (stage-only) creates an entry in the Approvals Queue. **(3)** Admin logs in, sees the queue badge, approves it, the entry moves to history, and the demo state mutates to confirm execution. **(4)** Closing and reopening the app preserves the session AND the pending queue entries.
 
 ### Risks addressed
-- Backend dependencies (Python + Bedrock) were not on the critical path for Day 2 — UI was wired to stubs first; Day 3 added the sidecar.
+- Backend dependencies (Python + Groq) were not on the critical path for Day 2 — UI was wired to stubs first; Day 3 added the sidecar.
 - Approvals queue persistence: covered by electron-store, no native compile.
 - Tool registry is hard-coded — no LLM tool-discovery complexity.
 
@@ -89,7 +96,7 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 - Re-enable `startPythonService()` in `electron/main.ts`.
 - Health badge in admin dashboard header polling `GET /health` (implemented: **5s** interval).
 - **Real action #1 — ClamAV `/scan-file`:** triggered from a "RUN FILE SCAN" tile in `AccessControlPanel`. Toast + audit row + tray notification.
-- **Real action #2 — `/ai-task` for the Productivity Assistant:** calls the Python sidecar; Bedrock when AWS creds exist, **`local_fallback`** label when not. *(Optional follow-up: parse model confidence into `confidenceScore` on chat audit rows — not blocking Day 3 exit.)*
+- **Real action #2 — `/ai-task` for the Productivity Assistant:** calls the Python sidecar; Groq when API key exists, **`local_fallback`** label when not. *(Optional follow-up: parse model confidence into `confidenceScore` on chat audit rows — not blocking Day 3 exit.)*
 - **Real action #3 — `/usb-list` (and stub `/usb-quarantine`):** Python service exposes pyusb enumeration. UI shows currently connected USB devices in a small panel on the admin Lab Monitoring view.
 - **Audit-log persistence wired** (per `decision-tree.md` §2):
   - **Path A (preferred):** `better-sqlite3` builds → call `db.logEvent(...)` from main; expose `audit:list` IPC.
@@ -102,7 +109,7 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 
 ### Risks addressed
 - `better-sqlite3` native compilation — fallback to electron-store JSON is the default.
-- Bedrock creds missing — Python service returns a labeled static response; demo still flows.
+- Groq API key missing — Python service returns a labeled static response; demo still flows.
 - ClamAV not installed — Python service falls through to SHA-256 + "clean" stub, clearly labeled.
 - pyusb permissions on Windows — fallback to a stage button that simulates the USB event.
 
@@ -121,6 +128,12 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
   4. Student sees non-blocking banner; their assistant remains usable.
   5. Admin approves → `quarantine_usb` executes (or simulated) → both audit rows written with linked `approvalId`.
   6. Tray notification fires.
+- `src/app/agentic/scenarios/blockedSite.ts` (or equivalent) — orchestrator for malicious/blocked-site path:
+  1. URL/domain assessed (policy + analyzer).
+  2. If high confidence malicious/blocked, enforcement is applied (not just banner copy).
+  3. Proposal enters queue when action tier requires HITL.
+  4. Student gets clear blocked-state feedback; admin gets evidence and decision controls.
+  5. Linked audit rows persist (`action_proposed` / `action_approved|rejected` / `action_executed|blocked`).
 
 ### Deliverables (governance — `agentic-architecture.md` §8)
 - **Consent banner** on first launch (modal) — accepts → writes `consent_given` audit row, persisted dismissed via `electron-store`.
@@ -136,18 +149,19 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 - AccessCode validation wired to `validateAccessCode` resolver.
 
 ### Deliverables (admin override actions — wired with HITL)
-- **Lock Cluster** confirm modal: classifies action HIGH → goes through Approvals Queue (admin self-approving demonstrates the two-party pattern). On approval, `policy.set('comlab_08_locked', '1')` + audit row.
+- **Lock Cluster** confirm modal: classifies action HIGH → goes through Approvals Queue. On approval, `policy.set('comlab_08_locked', '1')` + audit row.
 - **Terminate All Sessions**: same pattern.
 - **WIPE TERMINAL** alert button: same pattern.
-- **Kiosk Mode toggle** in Settings: classified MEDIUM (reversible, single-machine) → auto-executes with audit row.
+- **Kiosk Mode toggle** in Settings: classified MEDIUM → **HITL required** for this sprint (stakeholder lock).
+- **Enforcement truthfulness:** any sensitive action without real implementation must hard-fail with explicit reason; never return success stubs.
 
 ### Exit criterion
-**The canonical USB scenario from `agentic-architecture.md` §7 runs end-to-end without the presenter touching code: USB triggers (real or staged) → assistant remains usable → admin queue shows the request → admin approves → action executes → tray notifies → audit shows the linked rows.** Plus 7+/9 of the Definition-of-Done items in `agentic-architecture.md` §13.
+**The canonical USB scenario AND blocked-site scenario run end-to-end without the presenter touching code: trigger → assistant remains usable → admin queue shows request when HITL is required → separate admin approves/rejects from another device → enforcement executes (or hard-fails truthfully) → tray/toast feedback appears → audit shows linked rows.** Plus 7+/9 of the Definition-of-Done items in `agentic-architecture.md` §13.
 
 ### Risks addressed
 - USB hardware unreliable on demo machine — stage button simulates the perception event.
-- Bedrock latency unpredictable — assistant has a 5s timeout with a labeled fallback message.
-- Admin self-approval feeling weird — narrate it: "The two-party pattern protects against accidental clicks; in production the proposer and approver are different people."
+- Groq latency unpredictable — assistant has a 5s timeout with a labeled fallback message.
+- Two-device dependency risk — pre-stage both student/admin laptops and verify proposer/approver identity chain before rehearsal starts.
 
 ---
 

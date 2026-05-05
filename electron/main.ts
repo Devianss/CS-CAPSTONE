@@ -383,7 +383,13 @@ function startPythonService(): void {
 
     pythonProcess = spawn(cmd, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, FLASK_PORT: String(PYTHON_PORT) },
+      env: {
+        ...process.env,
+        AI_PROVIDER: process.env.AI_PROVIDER ?? "groq",
+        GROQ_MODEL: process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+        AWS_REGION: process.env.AWS_REGION ?? "ap-southeast-1",
+        FLASK_PORT: process.env.FLASK_PORT ?? String(PYTHON_PORT),
+      },
       windowsHide: true,
     });
 

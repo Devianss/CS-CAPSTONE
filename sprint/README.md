@@ -40,7 +40,7 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 - Custom titlebar + frameless window + kiosk toggle.
 - Session persistence via `electron-store`.
 - A working IPC bridge (`window.electronAPI.*`).
-- Real `/scan-file` (ClamAV or stub), real `/ai-task` (Bedrock or canned), real or simulated `/usb-list`.
+- Real `/scan-file` (ClamAV or stub), real `/ai-task` (Groq or canned), real or simulated `/usb-list`.
 - Audit-log persistence (electron-store JSON default; SQLite if `better-sqlite3` builds).
 - Hard-coded "demo accounts" for student + admin login (no Cognito).
 - Local dev launch (`npm run dev`) works reliably end-to-end.
@@ -48,7 +48,7 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 ## Out of scope (explicitly cut for the 5-day window)
 
 - AWS Cognito auth (sessions are local).
-- Real Bedrock evaluation rigor (a single canned response per tool is acceptable as long as it's labeled).
+- Real Groq evaluation rigor (a single canned response per tool is acceptable as long as it's labeled).
 - ClamAV install on the demo machine (stub scan with EICAR signature recognition acceptable).
 - Production Windows **MSI/code-signed** installer (still out of scope). **Portable `.exe` via electron-builder is in scope and is the primary Day 5 artifact** per stakeholder decision.
 - DynamoDB / S3 / QuickSight integration; cross-machine queue federation.
@@ -70,23 +70,34 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 | [`demo-script.md`](./demo-script.md) | The actual minute-by-minute demo walkthrough — re-anchored on the canonical USB-quarantine storyline |
 | [`scheduling-architecture.md`](./scheduling-architecture.md) | Lab + scheduling data model (Tier 1 work, folded into Day 4) |
 | [`frontend-audit.md`](./frontend-audit.md), [`frontend-audit-decisions.md`](./frontend-audit-decisions.md) | UI hygiene findings and tier decisions (Tier 1 work) |
-| [`stakeholder-decisions.md`](./stakeholder-decisions.md) | **Locked decisions** after Day 3 (demo storyline, real execution, governance, Bedrock, `.exe` priority) |
+| [`stakeholder-decisions.md`](./stakeholder-decisions.md) | **Locked decisions** after Day 3 (demo storyline, real execution, governance, Groq, `.exe` priority) |
 
 ---
 
-## Status snapshot (**as of Day 3 complete** — 2026-05-03)
+## Status snapshot (**as of Day 3 complete + sprint lock refresh** — 2026-05-05)
 
 | Layer | State |
 |---|---|
 | React UI (login, dashboards, settings, notifications) | **Shipped** — integrated with Electron session and agentic panels |
-| `electron/main.ts`, `electron/preload.ts` | **Shipped** — session, settings, window, `python:call` (GET/POST + timeout), dialog, tray, **audit:log / audit:list**, **agent:** queue + classify + **stub `executeAction` pending Day 4 real effects** |
+| `electron/main.ts`, `electron/preload.ts` | **Shipped** — session, settings, window, `python:call` (GET/POST + timeout), dialog, tray, **audit:log / audit:list**, **agent:** queue + classify. **Next locked work:** remove sensitive success stubs, enforce truthful hard-fail, route MEDIUM through HITL. |
 | `electron/db.ts` | **Excluded from build** — audit uses **Path B** (`electron-store` JSON), per `decision-tree.md` |
-| `python-service/service.py` | **Spawned from Electron** in dev — `/health`, `/scan-file` (EICAR + ClamAV/stub), `/ai-task` (Bedrock + `local_fallback`), `/usb-list` |
+| `python-service/service.py` | **Spawned from Electron** in dev — `/health`, `/scan-file` (EICAR + ClamAV/stub), `/ai-task` (Groq + `local_fallback`), `/usb-list` |
 | `package.json` | **Electron + Vite + builder tooling present** — uses **`npm`** / `package-lock.json` (not pnpm) |
 | Demo auth | **Shipped** — `demoUsers.ts` + `LoginPage` → `session.set`; **audit `login` row** on success |
 | Tray icon | **`HAS_ICON` guard** — optional PNG under `src/imports/` |
 
-**Green tags:** `day-1-green`, `day-2-green`, `day-3-green` on the timeline that passed exit criteria. **Next:** Day 4 (canonical USB flow, governance UI, **real** `executeAction`, policy IPC). **Day 5 focus:** **portable `.exe`** as primary artifact ([`stakeholder-decisions.md`](./stakeholder-decisions.md)).
+**Green tags:** `day-1-green`, `day-2-green`, `day-3-green` on the timeline that passed exit criteria. **Next:** Day 4 (canonical USB flow, blocked-site enforcement, governance UI, truthful execution engine, policy IPC, medium=HITL). **Day 5 focus:** **portable `.exe`** as primary artifact ([`stakeholder-decisions.md`](./stakeholder-decisions.md)).
+
+### Locked sprint priorities (2026-05-05)
+
+1. **Defense demo polish, future-ready for production** (ship fast).
+2. Non-negotiable flows: USB scan, productivity assistant, blocked-site enforcement.
+3. No fake success on sensitive actions; hard-fail clearly when unimplemented.
+4. MEDIUM and HIGH actions follow HITL for this sprint.
+5. Separate proposer/approver devices in demo (student vs admin laptops).
+6. Student right panel remains compact; collapses to drawer on small windows.
+7. Severity-coded user warnings/toasts are mandatory.
+8. Continue with `electron-store` for sprint speed; broad cleanup deferred until post-demo.
 
 ---
 

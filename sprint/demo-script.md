@@ -107,12 +107,12 @@ A non-blocking banner appears on the student dashboard:
 
 ## Segment 4 — Admin Approvals Queue (3:30 – 5:30)
 
-**Stage:** Click avatar → Logout. (In production, a different physical admin terminal; for the demo, role switch on the same machine.)
+**Stage:** Student device stays on student view. Move to the separate admin laptop and sign in there.
 
 **Say (during transition):**
-> "I'm switching to the admin role. In a real lab this is a different physical machine — the queue is shared infrastructure."
+> "Now we move to the admin laptop. Proposer and approver are intentionally separate devices/users in this demo."
 
-**Stage:** Login as `admin@runa.edu.ph` / `runa-admin`.
+**Stage:** Login on admin laptop as `admin@runa.edu.ph` / `runa-admin`.
 
 **On screen:** Admin Dashboard. Sidebar shows a red "1" badge on **APPROVALS QUEUE** (new sidebar item).
 
@@ -184,7 +184,7 @@ A non-blocking banner appears on the student dashboard:
 The response carries a LOW RiskBadge.
 
 **Say:**
-> "Admin assistant. Same component, different system prompt, different tool whitelist. This response is LOW because it's a read-only summary — Claude on Bedrock parsed the audit log and produced a paragraph. Now watch what happens if I ask it to do something dangerous —"
+> "Admin assistant. Same component, different system prompt, different tool whitelist. This response is LOW because it's a read-only summary — Groq parsed the audit log and produced a paragraph. Now watch what happens if I ask it to do something dangerous —"
 
 **Stage:** Type: "Lock the entire COMLAB 08."
 
@@ -196,9 +196,17 @@ The badge on the message is HIGH (orange/red).
 **On screen:** Approvals Queue badge in sidebar increments to "1".
 
 **Say:**
-> "Even when the admin asks the assistant to do something HIGH-risk, the assistant doesn't execute — it queues. The same admin would have to go to the queue and approve their own request. That's the two-party pattern: protects against accidental acknowledgments, creates a non-repudiable audit trail. In production the proposer and approver are different people."
+> "Even when the admin asks the assistant to do something HIGH-risk, the assistant doesn't execute — it queues. High/Medium changes require explicit human approval in queue. In this sprint we demonstrate proposer and approver as different users/devices for a clear two-party audit chain."
 
 > If running short on time, skip clicking through the second approval. Just point at the queue badge and move on.
+
+---
+
+## Sprint lock note (2026-05-05)
+
+- Canonical defense run uses **two laptops**: student proposes, admin approves.
+- Malicious/blocked-site flow must show **actual enforcement effect**, not policy-only messaging.
+- Any sensitive path that is not implemented must **hard-fail clearly** (no fake success toast).
 
 ---
 
@@ -225,9 +233,9 @@ The badge on the message is HIGH (orange/red).
 | "Where exactly is the agentic behavior?" | "The Productivity Assistant chat panel (in both student and admin modes) and the security agent that handled the USB insertion. Both run on a Perception-Reasoning-Action cycle visible in the Action Timeline. The agent doesn't just react to clicks — it perceives system events, reasons about them via tool selection and risk classification, and acts within bounded permissions." |
 | "What stops the agent from doing something dangerous?" | "Three layers. Tool whitelist — fixed, hard-coded per role. Risk classifier — deterministic rule table. HITL gate — every HIGH action is BLOCKED in the Approvals Queue until an admin clicks Approve. The agent literally cannot wipe a terminal even if instructed to — there's no 'execute' tool in its registry." |
 | "Is the data real or mocked?" | "The audit log, session, security policy, and Approvals Queue are real and persisted to local storage. The dashboard occupancy gauges and the four-lab status grids are seeded with deterministic demo data — those would be backed by DynamoDB queries in production." |
-| "Why a Python sidecar instead of pure Node?" | "ClamAV bindings, AWS Bedrock SDK, and pyusb all have first-class Python ecosystems. Spawning a Flask service over loopback gives us those libraries without forcing the renderer to know about them." |
+| "Why a Python sidecar instead of pure Node?" | "ClamAV bindings, Groq SDK integration, and pyusb all have first-class Python ecosystems. Spawning a Flask service over loopback gives us those libraries without forcing the renderer to know about them." |
 | "What auth do you use?" | "For the demo, two hardcoded role accounts. The architecture is built for AWS Cognito — the session payload already has `token` and `expiresAt` fields in the right shape. Cognito wiring is Phase 2 of the thesis timeline." |
-| "What about offline mode?" | "Local SQLite (or electron-store JSON) holds session, settings, audit, policies, and the Approvals Queue. The app is fully functional offline; it only needs network for Bedrock AI tasks. If Bedrock is unreachable, the assistant falls back to a static response and labels it as such." |
+| "What about offline mode?" | "Local SQLite (or electron-store JSON) holds session, settings, audit, policies, and the Approvals Queue. The app is fully functional offline; it only needs network for Groq AI tasks. If Groq is unreachable, the assistant falls back to a static response and labels it as such." |
 | "How do you prevent students from killing the Electron process?" | "Kiosk mode + single-instance lock + tray restart. In production the Electron app would be auto-relaunched by a Windows service, and the student account would not have permission to kill it." |
 | "Why not browser instead of Electron?" | "We need OS-level kiosk, native file dialogs for scans, the system tray for background alerts, native USB enumeration via the Python sidecar, and a custom titlebar for branding. A browser tab can't do those." |
 | "Is the data scanned by the engine the EICAR test file?" | "Yes — EICAR is the industry standard harmless test signature. ClamAV detects it as `Eicar-Test-Signature`. We use it because real malware in a demo would be irresponsible." |
@@ -239,7 +247,7 @@ The badge on the message is HIGH (orange/red).
 ## Recovery scripts (if something breaks live)
 
 **If the assistant doesn't respond:**
-> "The Bedrock service is intermittent — let me show you the cached fallback." → The assistant should already have a 5s timeout that returns a static labeled response. Continue from there.
+> "The Groq service is intermittent — let me show you the cached fallback." → The assistant should already have a 5s timeout that returns a static labeled response. Continue from there.
 
 **If the USB perception doesn't fire:**
 > "The pyusb event is hardware-dependent — let me trigger it manually." → Click the stage **Simulate USB** button in the corner. Same code path.

@@ -15,7 +15,7 @@ pcu-lab-portal/
 │   └── db.ts           – better-sqlite3 schema + helpers
 │
 ├── python-service/
-│   └── service.py      – Flask microservice: ClamAV, USB, Bedrock AI
+│   └── service.py      – Flask microservice: ClamAV, USB, Groq AI
 │
 ├── src/
 │   ├── app/
@@ -61,21 +61,23 @@ pnpm install
 
 ```bash
 cd python-service
-pip install flask boto3 python-clamd watchdog requests pyusb
+pip install flask groq boto3 python-clamd watchdog requests pyusb
 # For Windows USB scanning:
 # pip install pywinusb
 ```
 
-### 3. Configure AWS credentials (for Bedrock + DynamoDB)
+### 3. Configure AI provider credentials
 
 ```bash
-# Option A – AWS CLI
-aws configure
+# Option A – python-service/.env
+AI_PROVIDER=groq
+GROQ_API_KEY=...
+GROQ_MODEL=llama-3.3-70b-versatile
 
 # Option B – Environment variables
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export AWS_REGION=us-east-1
+export AI_PROVIDER=groq
+export GROQ_API_KEY=...
+export GROQ_MODEL=llama-3.3-70b-versatile
 ```
 
 ---
@@ -182,7 +184,23 @@ function MyComponent() {
 | `/scan-file`   | POST   | `{ path }`           | `{ clean, threat, sha256 }`   |
 | `/scan-usb`    | POST   | —                    | `{ devices[], count }`        |
 | `/analyze-url` | POST   | `{ url }`            | `{ suspicious, score }`       |
-| `/ai-task`     | POST   | `{ prompt, system }` | `{ response, input_tokens }`  |
+| `/ai-task`     | POST   | `{ prompt, system?, role?, tools?, history?, maxTokens?, temperature? }` | `{ ok, response, source, model, inputTokens, outputTokens, totalTokens, updatedHistory }`  |
+
+AI provider defaults to **Groq** using `llama-3.3-70b-versatile`. Configure per machine with:
+
+```bash
+set AI_PROVIDER=groq
+set GROQ_API_KEY=your_key_here
+set GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+## Groq Setup
+
+### Required API Key
+Create a Groq API key and set it as `GROQ_API_KEY` in `python-service/.env`.
+
+### Model Selection
+Primary model: `llama-3.3-70b-versatile`.
 
 ---
 

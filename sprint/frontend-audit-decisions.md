@@ -7,7 +7,7 @@ Companion to `frontend-audit.md`. Each of the 15 open questions answered with a 
 ## Guiding principles for the defense
 
 1. **Real architecture beats polished mocks.** Panelists score "does the system actually work end-to-end" higher than "does it look pretty." Every interactive element should be either **fully wired** or **removed**. "Looks clickable but does nothing" is a worse outcome than "absent."
-2. **Lean kiosk-first.** This is a desktop app for a fixed institutional resolution. Don't burn time on responsive design that the production target doesn't need.
+2. **Lean kiosk-first.** This is a desktop app for a fixed institutional resolution. Keep responsive effort minimal; only implement the locked sprint requirement: student right-pane **drawer/collapse** so controls remain usable on narrower windows.
 3. **Lock the demo path before polishing branches.** If a button isn't on the demo script, defer or delete.
 4. **Cut, don't carry.** Every dead button you leave invites a panelist question you can't answer well.
 
@@ -37,11 +37,13 @@ Companion to `frontend-audit.md`. Each of the 15 open questions answered with a 
 
 ### A3. Reflow dashboards on narrow widths?
 
-**SKIP.** Follows from A2 — at the target resolution all current grid layouts fit comfortably. Adding `sm:`/`md:` variants is hours of work that wouldn't be exercised during the demo or in production.
+**PARTIAL.** Keep full dashboard reflow out of scope, but implement the locked sprint requirement:
+- student right pane must collapse to drawer on narrow widths;
+- critical controls must remain clickable (no clipping/truncation).
 
-- **Defense framing:** "The application is full-screen kiosk; reflow is unnecessary."
-- **Action:** None. Documented as deliberate non-goal.
-- **Skip**
+- **Defense framing:** "Full responsive redesign is out of scope; we implemented targeted resilience so core controls remain functional below the kiosk target width."
+- **Action:** Drawer/collapse behavior for student right pane only; no global dashboard breakpoint redesign.
+- **Tier 2 (Day 4)** · **30–45 min**
 
 ---
 

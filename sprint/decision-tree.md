@@ -91,34 +91,31 @@ flowchart TD
 
 ---
 
-## §5 Bedrock / `/ai-task` doesn't have AWS creds (Day 3 stretch / Day 5)
+## §5 Groq / `/ai-task` doesn't have API key (Day 4 / Day 5)
 
-`/ai-task` is a stretch goal. If it isn't working by Day 5 morning, **leave it cut**.
+`/ai-task` is expected for the defense run. If provider auth fails on the day, keep the endpoint live and fall back to clearly-labeled local responses (do not cut the assistant flow).
 
 ```mermaid
 flowchart TD
-    A[POST /ai-task returns 500<br/>NoCredentialsError] --> B{Do you have an AWS account<br/>with Bedrock model access?}
-    B -- No --> C[Cut /ai-task from demo entirely<br/>OR replace with a static<br/>canned response in service.py]
-    B -- Yes --> D{Have you enabled Claude 3.5<br/>Sonnet in Bedrock console?}
-    D -- No --> D1["Bedrock → Model access → Request<br/>(usually instant for Anthropic)"]
+    A[POST /ai-task fails<br/>auth/network/provider error] --> B{Is GROQ_API_KEY set<br/>in python-service/.env?}
+    B -- No --> C[Keep /ai-task route active but return<br/>clearly-labeled local fallback response]
+    B -- Yes --> D{Is AI_PROVIDER='groq'<br/>and model valid?}
+    D -- No --> D1["Set AI_PROVIDER=groq<br/>and GROQ_MODEL=llama-3.3-70b-versatile"]
     D1 --> E
-    D -- Yes --> E{aws configure done?}
-    E -- No --> E1[aws configure with IAM creds<br/>that have bedrock:InvokeModel]
-    E1 --> F
-    E -- Yes --> F[Test with curl directly to Flask:<br/>curl -XPOST localhost:5001/ai-task<br/>-d '{prompt:hello}']
-    F --> G{200 response?}
+    D -- Yes --> E[Test with curl directly to Flask:<br/>curl -XPOST localhost:5001/ai-task<br/>-d '{prompt:hello}']
+    E --> G{200 response?}
     G -- Yes --> H[✅ Wire a small chat UI<br/>or canned button into admin console]
     G -- No --> C
 ```
 
-**Canned-response fallback** (5-minute change): in `service.py` `/ai-task`, return:
+**Canned-response fallback** (5-minute change): in `service.py` `/ai-task`, return a clearly-labeled local response:
 ```py
 return jsonify(ok=True,
     response=("Today's lab activity summary: 24 students across COMLAB 8, 1 quarantine event "
              "in COMLAB 8 PC-01 (kill_linux_skills.exe). All security protocols nominal."),
     input_tokens=0)
 ```
-Demo it as if Bedrock is responding. Mention the real integration in the thesis defense.
+In defense narration, explicitly state this is a fallback response because Groq credentials were unavailable on that machine.
 
 ---
 
@@ -184,7 +181,7 @@ If by **end of Day N** you don't have **enough**, here's what to drop, in order:
 | 4 | Kiosk mode toggle | Frameless window already feels kiosk-y |
 | 4 | Tray notifications | Toasts cover the same UX |
 | 5 | Packaged `.exe` (use dev launcher) | Already in §6 |
-| 5 | `/ai-task` Bedrock | Already cut by default |
+| 5 | `/ai-task` Groq | Already cut by default |
 
 **Last-resort minimum viable demo (~2.5 days of work):**
 - Electron window opens with React UI.

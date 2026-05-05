@@ -68,7 +68,7 @@ Every agentic action is classified into one of three tiers at decision time. **T
 | Tier | Criteria | HITL gate? | Examples |
 |---|---|---|---|
 | **LOW** | Read-only, reversible, in-scope per role. No system state mutation outside the chat session. | None — auto-execute, log it | Productivity assistant answers a question. Audit log query. Health check. View policy. |
-| **MEDIUM** | Mutates non-critical state OR provides a recommendation that the user will act on. Reversible. | None — auto-execute, log it, surface in UI for transparency | Recommend a response to an alert. Suggest a website blocklist entry. Generate a draft policy. Mark a notification as read. |
+| **MEDIUM** | Mutates non-critical state OR provides a recommendation that the user will act on. Reversible. | **Sprint lock (2026-05-05): route through HITL**. Baseline architecture allows auto-execute in mature deployments. | Recommend a response to an alert. Suggest a website blocklist entry. Generate a draft policy. Mark a notification as read. |
 | **HIGH** | Mutates critical state, irreversible, or affects multiple users. | **BLOCK** — route to admin Approvals Queue. Action cannot proceed without explicit Approve. | Wipe terminal. Lock cluster. Terminate sessions. Quarantine USB. Add URL to enforced blocklist. Force-logout student. |
 
 ### Classifier inputs
@@ -134,7 +134,7 @@ The Productivity Assistant works in two modes — **student** and **admin** — 
 ### Admin mode
 
 **System prompt (excerpt):**
-> "You are a bounded operational assistant for a laboratory administrator. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. All HIGH-risk actions you propose must be approved by an admin in the Approvals Queue, including by the same admin you are speaking to."
+> "You are a bounded operational assistant for a laboratory administrator. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. HIGH-risk actions must be approved in the Approvals Queue. For this sprint's defense run, proposer and approver are separate users/devices."
 
 **Tool whitelist:**
 | Tool | Risk | Description |
@@ -373,7 +373,7 @@ Pre-baked answers for likely panelist questions, beyond the existing Q&A in `dem
 |---|---|
 | "Where exactly is the agentic behavior?" | "The Productivity Assistant chat panel and the security agent that handled the USB insertion. Both run on a Perception-Reasoning-Action cycle visible in the Action Timeline. The agent doesn't just react to clicks — it perceives system events, reasons about them via tool selection and risk classification, and acts within bounded permissions." |
 | "What stops it from doing something dangerous?" | "Three layers. First, the tool whitelist — the agent can only invoke tools we've explicitly registered per role. Second, the risk classifier — every action is classified LOW/MEDIUM/HIGH by deterministic rules. Third, the HITL gate — every HIGH action is blocked in the Approvals Queue until an admin clicks Approve. The agent cannot wipe a terminal even if instructed to." |
-| "Is the risk classification AI-based? What happens if it's wrong?" | "The classifier is rule-based and deterministic, exactly to avoid that failure mode. The rule table is in source — no opaque scoring. For AI-driven recommendations, we add a confidence threshold: if Claude's confidence is below 0.7, we escalate one tier. The fallback is always 'route to human.'" |
+| "Is the risk classification AI-based? What happens if it's wrong?" | "The classifier is rule-based and deterministic, exactly to avoid that failure mode. The rule table is in source — no opaque scoring. For AI-driven recommendations, we add a confidence threshold: if model confidence is below 0.7, we escalate one tier. The fallback is always 'route to human.'" |
 | "Why HITL instead of HOTL? Doesn't that defeat automation?" | "Per Waber et al. (2026), HOTL works in mature production systems where reversibility and rollback are well-understood. For a university laboratory prototype dealing with security state — wiping disks, locking clusters — irreversibility is the dominant concern. Our design accepts the latency cost of HITL for the safety guarantee. Phase 2 work could promote LOW-MEDIUM auto-execution and HOTL-style admin oversight, but HIGH stays HITL." |
 | "How do you handle the 3 AM scenario where no admin is online?" | "Two answers. Architectural: the Approvals Queue persists, so the request waits. The student sees 'Your action is queued for review' and the dangerous artifact (USB, file) is held in quarantine. Operational: Phase 2 adds a tiered escalation policy — if no admin acts within N hours, the request is routed to a higher role or auto-rejected with notification. We don't auto-approve at any tier." |
 | "Show me where the agent's decision is logged." | (Click AUDIT, point to the action_proposed → action_approved → action_executed rows linked by approvalId.) "Every reasoning step generates an audit row. The chain is reconstructable from the approvalId. In the production design, each row carries a chained hash for tamper-evidence." |
@@ -398,7 +398,7 @@ What we actually build, when, and what's a stub vs. real.
 | `<ProductivityAssistant />` chat | 2 | Stub backend | UI complete; backend canned responses |
 | `<ApprovalsQueue />` admin panel | 2 | Real | Reads from queue, dispatches decisions |
 | `<ActionTimeline />` component | 3 | Real | P-R-A renderer |
-| Real `/ai-task` wiring | 3 | Real | Calls Bedrock if creds present, else canned |
+| Real `/ai-task` wiring | 3 | Real | Calls Groq if key present, else canned |
 | Real ClamAV `/scan-file` wiring | 3 | Real (or stub fallback) | Already exists in Python service |
 | Real `/usb-list` and `/usb-quarantine` | 3 | Real on demo machine, stub elsewhere | pyusb |
 | `<GovernanceBanner />` + consent modal | 4 | Real | Five small UI affordances per §8 |

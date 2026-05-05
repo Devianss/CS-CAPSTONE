@@ -277,7 +277,7 @@ Un-comment `startPythonService()` in `electron/main.ts`. Verify `python --versio
 
 ```bash
 cd python-service
-pip install flask boto3 python-clamd watchdog requests pyusb
+pip install flask groq boto3 python-clamd watchdog requests pyusb
 cd ..
 ```
 
@@ -660,7 +660,7 @@ const ADMIN_TOOLS: ToolDefinition[] = [
 
 const STUDENT_PROMPT = `You are a bounded academic assistant for a CS student. You may only respond to messages sent in this chat. You may not read files, access the network, or modify any system state. If asked to do anything beyond academic explanation, refuse and suggest the student contact lab staff.`;
 
-const ADMIN_PROMPT = `You are a bounded operational assistant for a laboratory administrator. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. All HIGH-risk actions you propose must be approved in the Approvals Queue, including by the same admin you are speaking to.`;
+const ADMIN_PROMPT = `You are a bounded operational assistant for a laboratory administrator. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. HIGH-risk actions must be approved in the Approvals Queue. For the defense run, proposer and approver are separate users/devices.`;
 
 export function getAgentContext(role: AgentRole, userId: string): AgentContext {
   return {
@@ -711,10 +711,11 @@ function setQueue(q: ApprovalRequest[]) { store.set(APPROVAL_KEY, q); }
 ipcMain.handle('agent:propose', async (_e, args: { action: AgentAction; requesterId: string; requesterRole: 'student' | 'admin' }) => {
   // Risk-classify on the main side as well as renderer (defense in depth)
   const tier = classifyAction(args.action);
-  if (tier !== 'high') {
-    // LOW/MEDIUM auto-execute path — caller handles, queue not used
+  if (tier === 'low') {
+    // LOW auto-execute path — queue not used
     return { autoExecuted: true, tier };
   }
+  // Sprint lock (2026-05-05): MEDIUM and HIGH both route through HITL.
   const req: ApprovalRequest = {
     id: crypto.randomUUID(), createdAt: Date.now(),
     requesterId: args.requesterId, requesterRole: args.requesterRole,
@@ -792,7 +793,7 @@ proposeAction({
 
 ### 6.9 Real `/ai-task` wiring (Day 3)
 
-Extend the Python service's `/ai-task` to accept `{ prompt, role, tools }`. If Bedrock creds present, build a Claude system message with the role-specific system prompt + tool whitelist. Else return a canned response keyed by the prompt's first verb.
+Extend the Python service's `/ai-task` to accept `{ prompt, role, tools }`. If `GROQ_API_KEY` is present, call Groq with the role-specific system prompt + tool whitelist. Else return a canned response keyed by the prompt's first verb.
 
 Renderer-side: replace the canned responses in `ProductivityAssistant` with real `electronAPI.python.call('/ai-task', ...)` calls. 5-second timeout — on timeout, render a labeled fallback message.
 
@@ -846,9 +847,13 @@ Coordinates the full USB → quarantine flow:
 
 ### 6.14 Wire admin override actions through the queue (Day 4)
 
-The original §4.2–§4.5 work for Lock Cluster / Terminate / WIPE TERMINAL changes shape: instead of directly calling `policy.set` + `audit.log`, those buttons now call `proposeAction` with the appropriate `AgentAction`. Since these are HIGH actions, they go through the queue. The same admin who clicked the button has to approve in the queue — narrate this as the two-party pattern.
+The original §4.2–§4.5 work for Lock Cluster / Terminate / WIPE TERMINAL changes shape: instead of directly calling `policy.set` + `audit.log`, those buttons now call `proposeAction` with the appropriate `AgentAction`. Since these are HIGH actions, they go through the queue.
 
-Kiosk Mode toggle is MEDIUM (reversible, single-machine), so it auto-executes with an audit row, no queue entry.
+Sprint lock (2026-05-05): demonstrate true two-party approval using separate devices/accounts (student proposes, admin approves). Avoid same-actor proposer/approver in the canonical run.
+
+Kiosk Mode toggle is MEDIUM (reversible, single-machine), and for this sprint MEDIUM is also routed through HITL.
+
+Additionally, remove any "stub executed successfully" fallback for sensitive actions in main; unimplemented sensitive actions must hard-fail with explicit reason text.
 
 ### 6.15 Governance affordances (Day 4)
 

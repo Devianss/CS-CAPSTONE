@@ -30,7 +30,7 @@ import type { AgentRole, RiskTier, ToolDefinition } from "../../agentic/types";
 import { getAgentContext, findTool } from "../../agentic/toolRegistry";
 import { explainClassification } from "../../agentic/riskClassifier";
 import { proposeAction, logAudit } from "../../agentic/approvalQueue";
-import { useElectron } from "../../ipc/useElectron";
+import { useAI, useElectron, type AIMessage as AIConversationMessage } from "../../ipc/useElectron";
 import { useNotificationContext } from "../../providers/NotificationProvider";
 import { RiskBadge } from "./RiskBadge";
 import type { ActionType } from "../../agentic/types";
@@ -196,7 +196,7 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
   if (/summari[sz]e.*audit|audit.*summary/.test(p))
     return {
       text:
-        "Stub audit summary: in the past 30 minutes I observed N login events, M file scans, and K HITL approvals. The most notable event was the most recent action_proposed row. (Real Bedrock-backed summary lands on Day 3.)",
+          "Stub audit summary: in the past 30 minutes I observed N login events, M file scans, and K HITL approvals. The most notable event was the most recent action_proposed row. (Real provider-backed summary lands on Day 3.)",
       toolUsed: "summarize_audit",
     };
   if (/explain.*alert|what.*alert/.test(p))
@@ -227,12 +227,11 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
 // ─────────────────────────────────────────────
 //  Component
 // ─────────────────────────────────────────────
-type AiTaskBody = { ok?: boolean; response?: string; source?: string; detail?: string };
-
 export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, ProductivityAssistantProps>(
   function ProductivityAssistant({ role, userId, sessionExpiresAt, vaultDisplayPath, height }, ref) {
   const ctx = useMemo(() => getAgentContext(role, userId), [role, userId]);
   const electron = useElectron();
+  const { call: callAI } = useAI();
   const { pushToast } = useNotificationContext();
   const reminderTimers = useRef<number[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -273,6 +272,7 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
   }, [vaultDisplayPath, buildWelcomeText]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [history, setHistory] = useState<AIConversationMessage[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useImperativeHandle(
@@ -302,6 +302,10 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
     };
   }, []);
 
+  useEffect(() => {
+    setHistory([]);
+  }, [role, userId]);
+
   // Auto-scroll on new messages
   useEffect(() => {
     if (scrollRef.current) {
@@ -312,6 +316,11 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
   const send = async () => {
     const text = input.trim();
     if (!text || busy) return;
+    const activeSession = await electron.session.get();
+    if (!activeSession) {
+      setHistory([]);
+      return;
+    }
 
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -488,30 +497,39 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
     toolUsed = stub.toolUsed;
     refused = Boolean(stub.refused);
     let sidecarSource: string | undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
 
     if (!refused) {
-      const py = await electron.python.call<AiTaskBody>(
-        "/ai-task",
-        {
-          prompt: text,
-          system: ctx.systemPrompt,
-          role,
-          tools: ctx.availableTools.map((t) => t.id),
-        },
-        { method: "POST", timeoutMs: 60_000 },
-      );
-      if (py.ok && py.data && typeof py.data === "object") {
-        const body = py.data as AiTaskBody;
-        if (typeof body.response === "string" && body.response.trim().length > 0) {
-          assistantText = body.response.trim();
-          toolUsed = "ai_task";
-          refused = false;
-          sidecarSource = body.source;
+      const ai = await callAI({
+        prompt: text,
+        system: ctx.systemPrompt,
+        role,
+        tools: ctx.availableTools.map((t) => t.id),
+        history,
+        maxTokens: 1024,
+        temperature: 0.3,
+      });
+      if (ai.ok && typeof ai.response === "string" && ai.response.trim().length > 0) {
+        assistantText = ai.response.trim();
+        toolUsed = "ai_task";
+        refused = false;
+        sidecarSource = ai.source;
+        inputTokens = ai.inputTokens ?? 0;
+        outputTokens = ai.outputTokens ?? 0;
+        setHistory(ai.updatedHistory ?? []);
+      } else if (!ai.ok) {
+        if ((await electron.session.get()) == null) {
+          setHistory([]);
         }
-      } else if (!py.ok) {
         assistantText =
           stub.text +
-          `\n\nThe assistant service is offline or unreachable${py.error ? ` (${py.error})` : ""}. Please try again when the lab network is available. If this keeps happening, contact lab tech.`;
+          `\n\nThe assistant service is offline or unreachable${ai.error ? ` (${ai.error})` : ""}. Please try again when the lab network is available. If this keeps happening, contact lab tech.`;
+      } else {
+        assistantText =
+          ai.detail?.toLowerCase().includes("credential")
+            ? "AI service is offline. Please check AWS credentials or contact the lab tech."
+            : "Could not reach AI service. Try again.";
       }
     }
 
@@ -553,7 +571,13 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
 
     await logAudit({
       eventType: refused ? "request_refused" : "chat_response",
-      detail: JSON.stringify({ tool: toolUsed ?? null, reason, sidecarSource }),
+      detail: JSON.stringify({
+        tool: toolUsed ?? null,
+        reason,
+        sidecarSource,
+        inputTokens,
+        outputTokens,
+      }),
       actorUserId: auditActor,
       actorRole: auditRole,
       riskTier: finalTier,
@@ -622,7 +646,7 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
           <ShieldAlert size={11} className="mt-0.5 shrink-0 text-[#a06820]" />
           <p style={{ lineHeight: 1.4 }}>
             {role === "student"
-              ? "Safe file automation only under Runa_Folder (your session subfolder). No admin PC changes, no other users' files, no silent email/submit. In-app reminders only. Tools: "
+              ? "Hi I'm Runa, your AI assistant. I'm here to help you with your tasks. In-app reminders only. Tools: "
               : "I summarize, recommend, and draft. I do not directly execute state-mutating actions; HIGH-risk proposals route through the Approvals Queue. Tools available: "}
             <span className="text-[#7eb5f5]">
               {ctx.availableTools.map((t) => t.label).join(" · ")}

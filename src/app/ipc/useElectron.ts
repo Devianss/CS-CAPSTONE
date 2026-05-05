@@ -162,6 +162,51 @@ export function usePython() {
   return { call };
 }
 
+export interface AIMessage {
+  role: "user" | "assistant";
+  content: { text: string }[];
+}
+
+export interface AITaskPayload {
+  prompt: string;
+  system?: string;
+  role?: "student" | "admin";
+  tools?: string[];
+  history?: AIMessage[];
+  maxTokens?: number;
+  temperature?: number;
+}
+
+export interface AITaskResult {
+  ok: boolean;
+  response?: string;
+  source?: "groq" | "local_fallback";
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  updatedHistory?: AIMessage[];
+  error?: string;
+  detail?: string;
+}
+
+export function useAI() {
+  const { python } = useElectron();
+
+  const call = useCallback(async (payload: AITaskPayload): Promise<AITaskResult> => {
+    const result = await python.call<AITaskResult>("/ai-task", payload, {
+      method: "POST",
+      timeoutMs: 60_000,
+    });
+    if (!result.ok) {
+      return { ok: false, error: result.error ?? "Python sidecar unreachable" };
+    }
+    return result.data ?? { ok: false, error: "Empty response" };
+  }, [python]);
+
+  return { call };
+}
+
 export function useWindowControls() {
   const { window: win } = useElectron();
   return {
