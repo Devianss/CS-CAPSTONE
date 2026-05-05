@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { NotificationsMenu } from "../providers/NotificationProvider";
 import { useNotificationContext } from "../providers/NotificationProvider";
-import { ProductivityAssistant, type ProductivityAssistantHandle } from "./agentic/ProductivityAssistant";
+import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
 import { StudentRpaSidePanel } from "./student/rpaSidePanel/StudentRpaSidePanel";
 import { useElectron } from "../ipc/useElectron";
 import { findDemoUser } from "../auth/demoUsers";
@@ -86,7 +86,12 @@ export function StudentDashboard() {
   const [editLabel, setEditLabel] = useState("");
   const [editPath, setEditPath] = useState("");
   const [showCreateShortcutModal, setShowCreateShortcutModal] = useState(false);
-  const assistantRef = useRef<ProductivityAssistantHandle>(null);
+  const [siteCheckInput, setSiteCheckInput] = useState("");
+  const [siteCheckBusy, setSiteCheckBusy] = useState(false);
+  const [siteCheckResult, setSiteCheckResult] = useState<{
+    level: "allowed" | "blocked" | "warn";
+    text: string;
+  } | null>(null);
 
   const refreshShortcuts = useCallback(async () => {
     const list = await api.lab.getShortcuts();
@@ -194,6 +199,44 @@ export function StudentDashboard() {
   const handleLogout = async () => {
     await api.session.clear();
     navigate("/");
+  };
+
+  const runSiteCheck = async () => {
+    const raw = siteCheckInput.trim();
+    if (!raw || siteCheckBusy) return;
+    setSiteCheckBusy(true);
+    try {
+      const policy = await api.security.checkUrl(raw);
+      if (policy.ok && policy.blocked) {
+        const msg = `Blocked by lab policy: ${policy.domain}`;
+        setSiteCheckResult({ level: "blocked", text: msg });
+        pushToast(msg, "warn");
+        return;
+      }
+
+      const analyzed = await api.python.call<{ suspicious?: boolean; score?: number }>(
+        "/analyze-url",
+        { url: raw },
+        { method: "POST", timeoutMs: 15_000 },
+      );
+      if (!analyzed.ok || !analyzed.data) {
+        const msg = `Could not check URL right now${analyzed.error ? ` (${analyzed.error})` : ""}.`;
+        setSiteCheckResult({ level: "warn", text: msg });
+        pushToast(msg, "error");
+        return;
+      }
+      if (analyzed.data.suspicious) {
+        const msg = "Suspicious URL detected. This request may be escalated to admin for blocklist enforcement.";
+        setSiteCheckResult({ level: "warn", text: msg });
+        pushToast("Suspicious URL detected", "warn");
+      } else {
+        const msg = "URL allowed by current policy and analyzer checks.";
+        setSiteCheckResult({ level: "allowed", text: msg });
+        pushToast("URL allowed", "success");
+      }
+    } finally {
+      setSiteCheckBusy(false);
+    }
   };
 
   const pickTargetFile = async () => {
@@ -446,9 +489,62 @@ export function StudentDashboard() {
         </aside>
 
         <main className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden relative">
-          <div className="flex-1 min-h-0 p-4 box-border flex flex-col">
+          <div className="shrink-0 px-4 pt-4 pb-2">
+            <div
+              className="rounded-md border px-3 py-2"
+              style={{ background: "#111d30", borderColor: "#1e2e48" }}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <Shield size={12} className="text-[#e8821a]" />
+                <span className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>
+                  Website policy check (student feedback)
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={siteCheckInput}
+                  onChange={(e) => setSiteCheckInput(e.target.value)}
+                  placeholder="Try URL e.g. example.com"
+                  className="flex-1 rounded-sm px-2 py-1.5 border outline-none"
+                  style={{
+                    background: "#0f1a2a",
+                    borderColor: "#1e2e48",
+                    color: "#c5d5ea",
+                    fontSize: "11px",
+                    fontFamily: MONO,
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => void runSiteCheck()}
+                  disabled={siteCheckBusy || !siteCheckInput.trim()}
+                  className="px-3 py-1.5 rounded-sm disabled:opacity-50"
+                  style={{ background: "#3a5a9a", color: "#c5d5ea", fontSize: "10px", fontFamily: MONO }}
+                >
+                  CHECK
+                </button>
+              </div>
+              {siteCheckResult && (
+                <p
+                  className="mt-1.5"
+                  style={{
+                    fontSize: "10px",
+                    fontFamily: MONO,
+                    color:
+                      siteCheckResult.level === "blocked"
+                        ? "#e05c6a"
+                        : siteCheckResult.level === "allowed"
+                          ? "#4ac77e"
+                          : "#e8a83a",
+                  }}
+                >
+                  {siteCheckResult.text}
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="flex-1 min-h-0 p-4 pt-2 box-border flex flex-col">
             <ProductivityAssistant
-              ref={assistantRef}
               role="student"
               userId={studentId || "student@runa.edu.ph"}
               sessionExpiresAt={sessionExpiresAt}
@@ -465,7 +561,6 @@ export function StudentDashboard() {
           vaultPathFull={vaultPath}
           kioskMode={kioskMode}
           canEditShortcuts={canEditShortcuts}
-          onWorkflowSelect={(text) => assistantRef.current?.setComposerText(text)}
         />
       </div>
 

@@ -27,8 +27,18 @@ Granular unchecked boxes in older day sections are **archival**; use the table a
 - [x] Demo role split locked: **student proposes on one device, admin approves on another**.
 - [x] Student right pane direction locked: **compact control tower + drawer/collapse on small windows**.
 - [x] User feedback locked: severity-coded toasts/warnings are mandatory.
-- [x] Persistence locked to **electron-store** for sprint speed.
+- [x] Persistence updated: **hybrid local + Supabase Postgres** for two-runtime demo sync (queue/audit/blocklist).
 - [x] Process locked: **direct to main**, cleanup deferred, ship fast.
+
+### Sprint pause checkpoint (2026-05-05, late PM)
+
+- [x] Supabase backend path enabled in Electron main process for shared `approval_requests`, `audit_log`, and `blocked_domains`.
+- [x] Root `.env` loading added in Electron startup; root `.env.example` added for repeatable local setup.
+- [x] Node 20/Electron runtime compatibility fixed for Supabase client (`ws` transport configured).
+- [x] Runtime validation observed: database rows populate during live Groq assistant use (audit path active).
+- [x] Student right pane quick prompts removed per UX decision.
+- [x] Toast UX updated: notifications auto-dismiss with fade-out transition.
+- [x] Lint status at pause: clean (no current IDE lint errors).
 
 ---
 

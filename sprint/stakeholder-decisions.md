@@ -29,9 +29,16 @@ Canonical answers from the product owner / thesis team. **Supersedes informal ch
 | 15 | **Student right pane UX** | Keep **compact control tower**; on small windows use **drawer/collapse** behavior. |
 | 16 | **User feedback** | Show user-visible warnings/toasts with explicit severity color coding (info/success/warn/error). |
 | 17 | **AI runtime assumption** | Groq expected on defense machine; fallback still present for resilience. |
-| 18 | **Persistence path** | Continue with **electron-store** for sprint speed. |
+| 18 | **Persistence path** | Move to **hybrid local + Supabase Postgres** for two-runtime sync (approvals queue, audit log, blocked domains) while retaining local fallback. |
 | 19 | **Git flow** | **Direct to main** for this sprint; prioritize shipping speed over branch process overhead. |
 | 20 | **Repo hygiene scope** | Defer broad cleanup of unused files/deps until after demo-critical flows are green. |
+
+## Late sprint update (2026-05-05, pause checkpoint)
+
+- Supabase client integration is active in Electron main for shared-state reads/writes.
+- Runtime issue on Node 20 (`native WebSocket` missing) was resolved by wiring `ws` transport during Supabase client creation.
+- UX polish completed this pass: right-pane quick prompts removed and toast bubbles now fade out before dismissal.
+- Live validation note: Groq assistant activity is now generating database records in Supabase (audit flow observed).
 
 ## Implications for `roadmap.md` / `daily-checklist.md`
 

@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from "react";
-import { AlertTriangle, Users, Activity, MoreHorizontal, RefreshCw, X, Usb } from "lucide-react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { AlertTriangle, Users, Activity, RefreshCw, X, Usb, Shield, ChevronRight } from "lucide-react";
 import { useNotificationContext } from "../providers/NotificationProvider";
 import { useElectron } from "../ipc/useElectron";
 import { useAdminLab } from "../context/AdminLabContext";
+import { logAudit, proposeAction } from "../agentic/approvalQueue";
 import {
   ATTENDANCE_BY_LAB,
   COMLAB_DEFINITIONS,
@@ -32,6 +33,19 @@ type UsbDevice = {
 };
 
 type MonitoringPc = { id: string; status: PCStatus };
+type TimelineStatus = "pending" | "active" | "done";
+
+interface UsbTimelineState {
+  visible: boolean;
+  deviceLabel: string;
+  perceptionAt?: string;
+  reasoningAt?: string;
+  actionAt?: string;
+  perception: TimelineStatus;
+  reasoning: TimelineStatus;
+  action: TimelineStatus;
+  actionNote: string;
+}
 
 /** Stable baseline per lab — never recomputed on render. */
 const STATIC_PCS_BY_LAB: Record<ComlabId, MonitoringPc[]> = Object.fromEntries(
@@ -74,6 +88,112 @@ export function LabMonitoringPanel() {
   }, [pcs]);
   const [usbDevices, setUsbDevices] = useState<UsbDevice[]>([]);
   const [usbError, setUsbError] = useState<string | null>(null);
+  const [actorId, setActorId] = useState("admin");
+  const [urlInput, setUrlInput] = useState("");
+  const [blockedDomains, setBlockedDomains] = useState<string[]>([]);
+  const [urlCheckBusy, setUrlCheckBusy] = useState(false);
+  const [usbTimeline, setUsbTimeline] = useState<UsbTimelineState>({
+    visible: false,
+    deviceLabel: "",
+    perception: "pending",
+    reasoning: "pending",
+    action: "pending",
+    actionNote: "Waiting for USB event.",
+  });
+  const seenUsbSignaturesRef = useRef<Set<string>>(new Set());
+  const usbBaselineReadyRef = useRef(false);
+
+  const refreshBlockedDomains = useCallback(async () => {
+    const rows = await api.security.listBlockedDomains();
+    setBlockedDomains(rows);
+  }, [api]);
+
+  useEffect(() => {
+    void api.session.get().then((s) => {
+      if (s?.userId) setActorId(s.userId);
+    });
+    void refreshBlockedDomains();
+  }, [api, refreshBlockedDomains]);
+
+  const orchestrateUsbInsertion = useCallback(
+    async (device: UsbDevice) => {
+      const label = `${device.manufacturer ?? "Unknown"} ${device.product ?? "USB"}`.trim();
+      const now = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      setUsbTimeline({
+        visible: true,
+        deviceLabel: label,
+        perception: "done",
+        reasoning: "active",
+        action: "pending",
+        perceptionAt: now,
+        reasoningAt: now,
+        actionNote: "Scanning USB and preparing proposal...",
+      });
+      pushToast(`USB detected: ${label}`, "warn");
+      await logAudit({
+        eventType: "usb_inserted",
+        detail: JSON.stringify({ device }),
+        actorUserId: actorId,
+        actorRole: "admin",
+        riskTier: "low",
+      });
+
+      const scan = await api.python.call<{ ok?: boolean; devices?: UsbDevice[]; count?: number }>(
+        "/scan-usb",
+        {},
+        { method: "POST", timeoutMs: 30_000 },
+      );
+      const scanAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      await logAudit({
+        eventType: "usb_scan_complete",
+        detail: JSON.stringify({ ok: scan.ok, deviceLabel: label }),
+        actorUserId: actorId,
+        actorRole: "admin",
+        riskTier: "medium",
+      });
+
+      const proposal = await proposeAction(
+        {
+          type: "quarantine_usb",
+          scope: "session",
+          reversible: true,
+          payload: {
+            device: label,
+            product: device.product ?? "unknown",
+            vendor: device.vendor_id ?? "unknown",
+            reason: "removable_media_policy",
+          },
+          confidence: 0.85,
+          reasoning: `USB orchestrator policy triggered for newly inserted device: ${label}`,
+        },
+        actorId,
+        "admin",
+        { scanResult: scan.data ?? null, sourceAlert: "usb_inserted" },
+      );
+
+      const actionAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      if (proposal.autoExecuted) {
+        setUsbTimeline((prev) => ({
+          ...prev,
+          reasoning: "done",
+          action: "done",
+          reasoningAt: scanAt,
+          actionAt,
+          actionNote: proposal.result.message,
+        }));
+      } else {
+        setUsbTimeline((prev) => ({
+          ...prev,
+          reasoning: "done",
+          action: "done",
+          reasoningAt: scanAt,
+          actionAt,
+          actionNote: `HIGH risk queued for HITL approval: ${proposal.request.id.slice(0, 8)}…`,
+        }));
+      }
+    },
+    [actorId, api, pushToast],
+  );
 
   useEffect(() => {
     const t = setInterval(() => setSessionSecs((s) => (s > 0 ? s - 1 : 0)), 1000);
@@ -91,8 +211,24 @@ export function LabMonitoringPanel() {
       if (cancelled) return;
       if (r.ok && r.data && typeof r.data === "object" && (r.data as { ok?: boolean }).ok !== false) {
         const body = r.data as { devices?: UsbDevice[]; count?: number };
-        setUsbDevices(Array.isArray(body.devices) ? body.devices : []);
+        const nextDevices = Array.isArray(body.devices) ? body.devices : [];
+        setUsbDevices(nextDevices);
         setUsbError(null);
+        const signatures = nextDevices.map((d) => `${d.vendor_id ?? "?"}:${d.product_id ?? "?"}:${d.product ?? "?"}`);
+        if (!usbBaselineReadyRef.current) {
+          seenUsbSignaturesRef.current = new Set(signatures);
+          usbBaselineReadyRef.current = true;
+          return;
+        }
+        const seen = seenUsbSignaturesRef.current;
+        const inserted = nextDevices.filter((d) => {
+          const sig = `${d.vendor_id ?? "?"}:${d.product_id ?? "?"}:${d.product ?? "?"}`;
+          return !seen.has(sig);
+        });
+        seenUsbSignaturesRef.current = new Set(signatures);
+        if (inserted.length > 0) {
+          void orchestrateUsbInsertion(inserted[0]);
+        }
       } else {
         setUsbDevices([]);
         setUsbError(r.error ?? "unreachable");
@@ -104,7 +240,68 @@ export function LabMonitoringPanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [api]);
+  }, [api, orchestrateUsbInsertion]);
+
+  const evaluateUrl = useCallback(async () => {
+    const raw = urlInput.trim();
+    if (!raw) return;
+    setUrlCheckBusy(true);
+    try {
+      const check = await api.security.checkUrl(raw);
+      if (check.ok && check.blocked) {
+        pushToast(`Blocked by policy: ${check.domain}`, "warn");
+        await logAudit({
+          eventType: "url_blocked",
+          detail: JSON.stringify({ domain: check.domain, source: "local_policy" }),
+          actorUserId: actorId,
+          actorRole: "admin",
+          riskTier: "high",
+        });
+        return;
+      }
+
+      const analysis = await api.python.call<{ ok?: boolean; suspicious?: boolean; score?: number; url?: string }>(
+        "/analyze-url",
+        { url: raw },
+        { method: "POST", timeoutMs: 30_000 },
+      );
+      if (!analysis.ok || !analysis.data) {
+        pushToast(`URL check failed: ${analysis.error ?? "unknown error"}`, "error");
+        return;
+      }
+      const body = analysis.data;
+      if (body.suspicious) {
+        const domain = check.domain || raw;
+        const proposal = await proposeAction(
+          {
+            type: "enforce_blocklist",
+            scope: "lab",
+            reversible: true,
+            payload: {
+              domain,
+              url: raw,
+              score: body.score ?? 0.9,
+              reason: "suspicious_url_detected",
+            },
+            confidence: 0.8,
+            reasoning: `URL analyzer marked this URL suspicious (${body.score ?? 0}). Propose adding ${domain} to blocklist.`,
+          },
+          actorId,
+          "admin",
+        );
+        if (proposal.autoExecuted) {
+          pushToast(`Blocklist enforced for ${domain}`, "warn");
+        } else {
+          pushToast(`Suspicious URL queued for approval: ${proposal.request.id.slice(0, 8)}…`, "warn");
+        }
+      } else {
+        pushToast("URL is currently allowed by analyzer/policy", "success");
+      }
+      await refreshBlockedDomains();
+    } finally {
+      setUrlCheckBusy(false);
+    }
+  }, [actorId, api, pushToast, refreshBlockedDomains, urlInput]);
 
   const mm = Math.floor(sessionSecs / 60);
   const ss = sessionSecs % 60;
@@ -273,6 +470,107 @@ export function LabMonitoringPanel() {
             </ul>
           )}
         </div>
+
+        <div className="rounded-xl border p-4" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+          <div className="flex items-center gap-2 mb-2">
+            <Shield size={14} className="text-[#e8821a]" />
+            <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
+              URL policy enforcement
+            </span>
+          </div>
+          <p className="text-[#4a6080] mb-3" style={{ fontSize: "10px", fontFamily: MONO }}>
+            Checks local enforced blocklist first, then analyzer. Suspicious URLs queue `enforce_blocklist` via HITL.
+          </p>
+          <div className="flex gap-2 mb-3">
+            <input
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              placeholder="https://example.com"
+              className="flex-1 rounded px-2 py-1.5 border outline-none"
+              style={{
+                background: "#0d1320",
+                borderColor: "#1e2e48",
+                color: "#c5d5ea",
+                fontSize: "10px",
+                fontFamily: MONO,
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => void evaluateUrl()}
+              disabled={urlCheckBusy || !urlInput.trim()}
+              className="px-3 py-1.5 rounded disabled:opacity-50"
+              style={{ background: "#3a6fff", color: "#c5d5ea", fontSize: "10px", fontFamily: MONO }}
+            >
+              CHECK
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {blockedDomains.length === 0 ? (
+              <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                No enforced blocked domains yet.
+              </span>
+            ) : (
+              blockedDomains.map((domain) => (
+                <span
+                  key={domain}
+                  className="px-2 py-1 rounded border"
+                  style={{ borderColor: "#e05c6a50", color: "#e05c6a", fontSize: "9px", fontFamily: MONO }}
+                >
+                  {domain}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+
+        {usbTimeline.visible && (
+          <div className="rounded-xl border p-4" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+            <div className="flex items-center gap-2 mb-3">
+              <Activity size={14} className="text-[#7eb5f5]" />
+              <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
+                USB orchestrator timeline
+              </span>
+              <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                {usbTimeline.deviceLabel}
+              </span>
+            </div>
+            {(
+              [
+                { key: "perception", label: "Perception", at: usbTimeline.perceptionAt, status: usbTimeline.perception },
+                { key: "reasoning", label: "Reasoning", at: usbTimeline.reasoningAt, status: usbTimeline.reasoning },
+                { key: "action", label: "Action", at: usbTimeline.actionAt, status: usbTimeline.action },
+              ] as const
+            ).map((stage) => (
+              <div key={stage.key} className="flex items-center gap-2 mb-2">
+                <ChevronRight size={11} className="text-[#4a6080]" />
+                <span className="text-[#c5d5ea]" style={{ fontSize: "10px" }}>
+                  {stage.label}
+                </span>
+                <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                  {stage.at ?? "--:--:--"}
+                </span>
+                <span
+                  style={{
+                    fontSize: "8px",
+                    fontFamily: MONO,
+                    color:
+                      stage.status === "done"
+                        ? "#4ac77e"
+                        : stage.status === "active"
+                          ? "#e8a83a"
+                          : "#4a6080",
+                  }}
+                >
+                  {stage.status.toUpperCase()}
+                </span>
+              </div>
+            ))}
+            <p className="mt-2 text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+              {usbTimeline.actionNote}
+            </p>
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-5">
           {/* Terminal Matrix */}

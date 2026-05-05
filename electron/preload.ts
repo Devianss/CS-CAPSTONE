@@ -195,6 +195,15 @@ const api = {
     }): Promise<unknown> => ipcRenderer.invoke("agent:request-info", args),
   },
 
+  security: {
+    listBlockedDomains: (): Promise<string[]> =>
+      ipcRenderer.invoke("security:list-blocked-domains"),
+    checkUrl: (
+      url: string,
+    ): Promise<{ ok: boolean; blocked: boolean; domain: string; reason: "policy_blocked" | "allowed" | "invalid_url" }> =>
+      ipcRenderer.invoke("security:check-url", url),
+  },
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const validChannels = ["navigate", "notification:push", "usb:event"];
     if (validChannels.includes(channel)) {

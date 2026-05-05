@@ -139,6 +139,15 @@ const browserStubs: ElectronAPI = {
       comments: [{ at: Date.now(), byUserId: args.byUserId, text: args.text }],
     }),
   },
+  security: {
+    listBlockedDomains: async () => [],
+    checkUrl: async () => ({
+      ok: false,
+      blocked: false,
+      domain: "",
+      reason: "invalid_url" as const,
+    }),
+  },
   on: noop,
   off: noop,
 };

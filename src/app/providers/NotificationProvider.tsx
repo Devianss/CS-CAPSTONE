@@ -63,20 +63,29 @@ export function useNotificationContext(): NotificationContextValue {
 
 function PushToastBubble({ toast: t, onDismiss }: { toast: Toast; onDismiss: () => void }) {
   const st = TOAST_STYLE[t.type];
-  useEffect(() => {
-    const timer = setTimeout(onDismiss, 5000);
-    return () => clearTimeout(timer);
+  const [isClosing, setIsClosing] = useState(false);
+
+  const startDismiss = useCallback(() => {
+    setIsClosing(true);
+    setTimeout(onDismiss, 240);
   }, [onDismiss]);
+
+  useEffect(() => {
+    const timer = setTimeout(startDismiss, 5000);
+    return () => clearTimeout(timer);
+  }, [startDismiss]);
 
   return (
     <div
-      className="flex items-start gap-3 p-4 rounded-lg border shadow-xl"
+      className="flex items-start gap-3 p-4 rounded-lg border shadow-xl transition-all duration-200"
       style={{
         background: st.bg,
         borderColor: st.border + "55",
         minWidth: "280px",
         maxWidth: "340px",
         fontFamily: GROTESK,
+        opacity: isClosing ? 0 : 1,
+        transform: isClosing ? "translateX(6px)" : "translateX(0)",
       }}
     >
       <div className="flex-1 min-w-0">
@@ -89,7 +98,7 @@ function PushToastBubble({ toast: t, onDismiss }: { toast: Toast; onDismiss: () 
       </div>
       <button
         type="button"
-        onClick={onDismiss}
+        onClick={startDismiss}
         className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors shrink-0"
         aria-label="Dismiss"
       >

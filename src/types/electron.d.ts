@@ -239,6 +239,15 @@ interface ElectronAPI {
       text: string;
     }): Promise<ElectronApprovalRequest>;
   };
+  security: {
+    listBlockedDomains(): Promise<string[]>;
+    checkUrl(url: string): Promise<{
+      ok: boolean;
+      blocked: boolean;
+      domain: string;
+      reason: "policy_blocked" | "allowed" | "invalid_url";
+    }>;
+  };
   on(channel: string, listener: (...args: unknown[]) => void): void;
   off(channel: string, listener: (...args: unknown[]) => void): void;
 }

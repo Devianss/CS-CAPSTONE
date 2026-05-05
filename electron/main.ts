@@ -11,6 +11,8 @@ import {
 import path from "path";
 import { spawn, ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import WsWebSocket from "ws";
 const Store = require("electron-store");
 import fsSync from "fs";
 import {
@@ -19,6 +21,29 @@ import {
   sessionRelativeFolder,
   MAX_TEXT_FILE_BYTES,
 } from "./runaFiles";
+
+function loadRootEnvFile(): void {
+  const envPath = path.join(process.cwd(), ".env");
+  if (!fsSync.existsSync(envPath)) return;
+  try {
+    const raw = fsSync.readFileSync(envPath, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const idx = trimmed.indexOf("=");
+      if (idx <= 0) continue;
+      const key = trimmed.slice(0, idx).trim();
+      const value = trimmed.slice(idx + 1).trim().replace(/^"(.*)"$/, "$1");
+      if (key && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch (e) {
+    console.warn("[main] Failed loading root .env:", e);
+  }
+}
+
+loadRootEnvFile();
 
 // ─────────────────────────────────────────────
 //  Types (mirror src/app/agentic/types.ts — main stays self-contained)
@@ -125,6 +150,13 @@ interface StoreSchema {
   labShortcuts: LabShortcutRow[];
   auditLog: AuditRow[];
   approvalsQueue: ApprovalRequest[];
+  blockedDomains: string[];
+  quarantinedUsbEvents: Array<{
+    at: number;
+    device: string;
+    reason: string;
+    approvalId?: string;
+  }>;
 }
 
 // ─────────────────────────────────────────────
@@ -158,8 +190,26 @@ const store = new Store({
     labShortcuts: [] as LabShortcutRow[],
     auditLog: [] as AuditRow[],
     approvalsQueue: [] as ApprovalRequest[],
+    blockedDomains: [] as string[],
+    quarantinedUsbEvents: [] as Array<{
+      at: number;
+      device: string;
+      reason: string;
+      approvalId?: string;
+    }>,
   },
 });
+
+function normalizeDomain(input: string): string {
+  const raw = String(input || "").trim().toLowerCase();
+  if (!raw) return "";
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return new URL(withScheme).hostname.replace(/^www\./, "");
+  } catch {
+    return raw.replace(/^www\./, "").split("/")[0];
+  }
+}
 
 function readLabShortcuts(): LabShortcutRow[] {
   const raw = store.get("labShortcuts") as unknown;
@@ -213,6 +263,32 @@ function migrateLabShortcuts(): void {
 const AUDIT_LIMIT = 500;
 const QUEUE_LIMIT = 100;
 const CONFIDENCE_THRESHOLD = 0.7;
+const SUPABASE_URL = process.env.SUPABASE_URL?.trim() ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
+let supabaseClient: SupabaseClient | null = null;
+let supabaseWarned = false;
+
+function getSupabaseClient(): SupabaseClient | null {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    if (!supabaseWarned) {
+      console.warn(
+        "[main] Supabase backend disabled (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY).",
+      );
+      supabaseWarned = true;
+    }
+    return null;
+  }
+  if (!supabaseClient) {
+    // Node 20 in Electron does not provide native WebSocket required by supabase realtime client.
+    // We only use PostgREST here, but Supabase still initializes realtime on client creation.
+    supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      realtime: { transport: WsWebSocket as unknown as typeof WebSocket },
+    });
+    console.log("[main] Supabase backend enabled for shared queue/audit/policy.");
+  }
+  return supabaseClient;
+}
 
 const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   chat_response: "low",
@@ -261,6 +337,81 @@ function setQueue(rows: ApprovalRequest[]): void {
   store.set("approvalsQueue", rows.slice(-QUEUE_LIMIT));
 }
 
+function fromIsoMaybe(v: string | null | undefined, fallback = Date.now()): number {
+  if (!v) return fallback;
+  const parsed = Date.parse(v);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+async function listApprovalsRemote(): Promise<ApprovalRequest[] | null> {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    const { data, error } = await client
+      .from("approval_requests")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(QUEUE_LIMIT);
+    if (error) throw error;
+    const rows = (data ?? []).map((row) => {
+      const requesterRole: Role = row.requester_role === "admin" ? "admin" : "student";
+      return {
+      id: String(row.id),
+      createdAt: fromIsoMaybe(row.created_at),
+      requesterId: String(row.requester_id),
+      requesterRole,
+      action: row.action as AgentAction,
+      riskTier: "high" as const,
+      evidence: (row.evidence ?? undefined) as ApprovalEvidence | undefined,
+      status: row.status as ApprovalStatus,
+      decision: (row.decision ?? undefined) as ApprovalDecision | undefined,
+      comments: (row.comments ?? undefined) as ApprovalComment[] | undefined,
+      };
+    });
+    return rows.sort((a, b) => b.createdAt - a.createdAt);
+  } catch (e) {
+    console.error("[main] Supabase listApprovalsRemote failed:", e);
+    return null;
+  }
+}
+
+async function upsertApprovalsRemote(rows: ApprovalRequest[]): Promise<void> {
+  const client = getSupabaseClient();
+  if (!client) return;
+  const payload = rows.slice(-QUEUE_LIMIT).map((r) => ({
+    id: r.id,
+    created_at: new Date(r.createdAt).toISOString(),
+    requester_id: r.requesterId,
+    requester_role: r.requesterRole,
+    action: r.action,
+    risk_tier: r.riskTier,
+    evidence: r.evidence ?? null,
+    status: r.status,
+    decision: r.decision ?? null,
+    comments: r.comments ?? null,
+  }));
+  try {
+    const { error } = await client.from("approval_requests").upsert(payload);
+    if (error) throw error;
+  } catch (e) {
+    console.error("[main] Supabase upsertApprovalsRemote failed:", e);
+  }
+}
+
+async function readQueueShared(): Promise<ApprovalRequest[]> {
+  const remote = await listApprovalsRemote();
+  if (remote) {
+    setQueue(remote);
+    return remote;
+  }
+  return getQueue();
+}
+
+async function writeQueueShared(rows: ApprovalRequest[]): Promise<void> {
+  setQueue(rows);
+  await upsertApprovalsRemote(rows);
+}
+
 function nextAuditId(): number {
   const rows = getAuditRows();
   const max = rows.reduce((m, r) => Math.max(m, r.id), 0);
@@ -281,7 +432,104 @@ function logEvent(row: Omit<AuditRow, "id" | "createdAt"> & { id?: number; creat
     confidenceScore: row.confidenceScore,
   };
   setAuditRows([...getAuditRows(), full]);
+  void insertAuditRemote(full);
   return full;
+}
+
+async function listAuditRemote(limit = 200): Promise<AuditRow[] | null> {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    const { data, error } = await client
+      .from("audit_log")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) throw error;
+    return (data ?? []).map((row, idx) => ({
+      id: Number(row.id ?? idx + 1),
+      createdAt: fromIsoMaybe(row.created_at),
+      eventType: String(row.event_type ?? "unknown"),
+      actorUserId: String(row.actor_user_id ?? "unknown"),
+      actorRole: (row.actor_role ?? "system") as ActorRole,
+      detail: String(row.detail ?? ""),
+      approvalId: row.approval_id ?? undefined,
+      approverUserId: row.approver_user_id ?? undefined,
+      riskTier: (row.risk_tier ?? undefined) as RiskTier | undefined,
+      confidenceScore:
+        typeof row.confidence_score === "number" ? row.confidence_score : undefined,
+    }));
+  } catch (e) {
+    console.error("[main] Supabase listAuditRemote failed:", e);
+    return null;
+  }
+}
+
+async function insertAuditRemote(row: AuditRow): Promise<void> {
+  const client = getSupabaseClient();
+  if (!client) return;
+  try {
+    const { error } = await client.from("audit_log").insert({
+      created_at: new Date(row.createdAt).toISOString(),
+      event_type: row.eventType,
+      actor_user_id: row.actorUserId,
+      actor_role: row.actorRole,
+      detail: row.detail,
+      approval_id: row.approvalId ?? null,
+      approver_user_id: row.approverUserId ?? null,
+      risk_tier: row.riskTier ?? null,
+      confidence_score: row.confidenceScore ?? null,
+    });
+    if (error) throw error;
+  } catch (e) {
+    console.error("[main] Supabase insertAuditRemote failed:", e);
+  }
+}
+
+async function listBlockedDomainsRemote(): Promise<string[] | null> {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    const { data, error } = await client
+      .from("blocked_domains")
+      .select("domain")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return Array.from(
+      new Set(
+        (data ?? [])
+          .map((row) => normalizeDomain(String(row.domain ?? "")))
+          .filter(Boolean),
+      ),
+    );
+  } catch (e) {
+    console.error("[main] Supabase listBlockedDomainsRemote failed:", e);
+    return null;
+  }
+}
+
+async function upsertBlockedDomainRemote(domain: string): Promise<void> {
+  const client = getSupabaseClient();
+  if (!client) return;
+  try {
+    const { error } = await client.from("blocked_domains").upsert({
+      domain,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+  } catch (e) {
+    console.error("[main] Supabase upsertBlockedDomainRemote failed:", e);
+  }
+}
+
+async function readBlockedDomainsShared(): Promise<string[]> {
+  const remote = await listBlockedDomainsRemote();
+  if (remote) {
+    store.set("blockedDomains", remote);
+    return remote;
+  }
+  const rows = store.get("blockedDomains") as string[] | undefined;
+  return Array.isArray(rows) ? rows : [];
 }
 
 function findRequest(id: string): ApprovalRequest | undefined {
@@ -345,7 +593,51 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
     };
   }
 
-  return { ok: true, message: `Stub executed: ${action.type} (demo)` };
+  if (action.type === "enforce_blocklist") {
+    const candidate = String(action.payload.domain ?? action.payload.url ?? "").trim();
+    const domain = normalizeDomain(candidate);
+    if (!domain) {
+      return { ok: false, message: "Cannot enforce blocklist: missing valid domain/url." };
+    }
+    const current = store.get("blockedDomains") as string[] | undefined;
+    const list = Array.isArray(current) ? current : [];
+    if (!list.includes(domain)) {
+      store.set("blockedDomains", [...list, domain]);
+    }
+    void upsertBlockedDomainRemote(domain);
+    return { ok: true, message: `Blocklist enforced for domain: ${domain}` };
+  }
+
+  if (action.type === "quarantine_usb") {
+    const device = String(action.payload.device ?? action.payload.product ?? "Unknown USB device");
+    const reason = String(action.payload.reason ?? action.payload.threat ?? "policy_review");
+    const approvalId = typeof action.payload.approvalId === "string" ? action.payload.approvalId : undefined;
+    const current = store.get("quarantinedUsbEvents") as
+      | Array<{ at: number; device: string; reason: string; approvalId?: string }>
+      | undefined;
+    const rows = Array.isArray(current) ? current : [];
+    store.set("quarantinedUsbEvents", [
+      ...rows,
+      {
+        at: Date.now(),
+        device,
+        reason,
+        approvalId,
+      },
+    ]);
+    return { ok: true, message: `USB quarantined: ${device}` };
+  }
+
+  if (
+    action.type === "wipe_terminal" ||
+    action.type === "lock_cluster" ||
+    action.type === "terminate_session" ||
+    action.type === "force_logout"
+  ) {
+    return { ok: false, message: `${action.type} is not implemented in this build (hard-fail).` };
+  }
+
+  return { ok: true, message: `Executed non-sensitive action: ${action.type}` };
 }
 
 // ─────────────────────────────────────────────
@@ -959,7 +1251,12 @@ function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle("audit:list", (_e, limit = 200) => {
+  ipcMain.handle("audit:list", async (_e, limit = 200) => {
+    const remoteRows = await listAuditRemote(limit);
+    if (remoteRows) {
+      setAuditRows(remoteRows);
+      return remoteRows;
+    }
     const rows = getAuditRows();
     return [...rows].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
   });
@@ -967,7 +1264,7 @@ function registerIpcHandlers(): void {
   // ── Agent / HITL queue ───────────────────────
   ipcMain.handle(
     "agent:propose",
-    (
+    async (
       _e,
       args: {
         action: AgentAction;
@@ -990,7 +1287,8 @@ function registerIpcHandlers(): void {
           evidence,
           status: "pending",
         };
-        setQueue([...getQueue(), request]);
+        const queue = await readQueueShared();
+        await writeQueueShared([...queue, request]);
         logEvent({
           eventType: "action_proposed",
           detail: JSON.stringify({ approvalId: request.id, actionType: action.type }),
@@ -1016,12 +1314,12 @@ function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle("agent:list-pending", () =>
-    getQueue().filter((r) => r.status === "pending"),
+  ipcMain.handle("agent:list-pending", async () =>
+    (await readQueueShared()).filter((r) => r.status === "pending"),
   );
 
-  ipcMain.handle("agent:list-history", (_e, limit = 50) =>
-    getQueue()
+  ipcMain.handle("agent:list-history", async (_e, limit = 50) =>
+    (await readQueueShared())
       .filter((r) => r.status !== "pending")
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit),
@@ -1029,11 +1327,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     "agent:approve",
-    (
+    async (
       _e,
       args: { id: string; approverUserId: string; comment?: string },
     ) => {
-      const q = getQueue();
+      const q = await readQueueShared();
       const idx = q.findIndex((r) => r.id === args.id && r.status === "pending");
       if (idx === -1) throw new Error("Approval request not found or not pending");
 
@@ -1050,7 +1348,7 @@ function registerIpcHandlers(): void {
       };
       const next = [...q];
       next[idx] = updated;
-      setQueue(next);
+      await writeQueueShared(next);
 
       logEvent({
         eventType: "action_approved",
@@ -1077,13 +1375,31 @@ function registerIpcHandlers(): void {
     },
   );
 
+  // ── Security policy helpers ───────────────────
+  ipcMain.handle("security:list-blocked-domains", async () => readBlockedDomainsShared());
+
+  ipcMain.handle("security:check-url", async (_e, rawUrl: string) => {
+    const domain = normalizeDomain(rawUrl);
+    if (!domain) {
+      return { ok: false, blocked: false, domain: "", reason: "invalid_url" as const };
+    }
+    const blockedDomains = await readBlockedDomainsShared();
+    const blocked = blockedDomains.includes(domain);
+    return {
+      ok: true,
+      blocked,
+      domain,
+      reason: blocked ? ("policy_blocked" as const) : ("allowed" as const),
+    };
+  });
+
   ipcMain.handle(
     "agent:reject",
-    (
+    async (
       _e,
       args: { id: string; approverUserId: string; comment?: string },
     ) => {
-      const q = getQueue();
+      const q = await readQueueShared();
       const idx = q.findIndex((r) => r.id === args.id && r.status === "pending");
       if (idx === -1) throw new Error("Approval request not found or not pending");
 
@@ -1099,7 +1415,7 @@ function registerIpcHandlers(): void {
       };
       const next = [...q];
       next[idx] = updated;
-      setQueue(next);
+      await writeQueueShared(next);
 
       logEvent({
         eventType: "action_rejected",
@@ -1117,8 +1433,8 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     "agent:request-info",
-    (_e, args: { id: string; byUserId: string; text: string }) => {
-      const q = getQueue();
+    async (_e, args: { id: string; byUserId: string; text: string }) => {
+      const q = await readQueueShared();
       const idx = q.findIndex((r) => r.id === args.id && r.status === "pending");
       if (idx === -1) throw new Error("Approval request not found or not pending");
 
@@ -1132,7 +1448,7 @@ function registerIpcHandlers(): void {
       };
       const next = [...q];
       next[idx] = updated;
-      setQueue(next);
+      await writeQueueShared(next);
 
       logEvent({
         eventType: "action_info_requested",

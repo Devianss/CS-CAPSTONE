@@ -15,11 +15,11 @@ Day 2  ─── Agentic Spine + Auth ───────  Assistant, Risk bad
 Day 3  ─── Real Wiring ────────────────  Python sidecar: /health, /scan-file,
                                          /ai-task, /usb-list, audit persistence    [DONE — day-3-green]
 Day 4  ─── Demo Flow + Governance ─────  Canonical USB flow, real executeAction,
-                                         Timeline, RA 10173 UI, policy IPC        [NEXT]
+                                         Timeline, RA 10173 UI, policy IPC        [IN PROGRESS]
 Day 5  ─── Build + Rehearse ───────────  Portable .exe (primary), dry runs, recovery
 ```
 
-**Stakeholder decisions (2026-05-03 + 2026-05-05 lock):** canonical USB-first demo, **real** post-approve execution, **real** blocked-site enforcement, **MEDIUM + HIGH through HITL** for this sprint, proposer/approver on separate devices, compact right-rail with drawer/collapse behavior, Groq on defense laptop, **`.exe`** as Day 5 primary artifact — see [`stakeholder-decisions.md`](./stakeholder-decisions.md).
+**Stakeholder decisions (2026-05-03 + 2026-05-05 lock):** canonical USB-first demo, **real** post-approve execution, **real** blocked-site enforcement, **MEDIUM + HIGH through HITL** for this sprint, proposer/approver on separate devices, compact right-rail with drawer/collapse behavior, Groq on defense laptop, **hybrid local + Supabase shared state**, **`.exe`** as Day 5 primary artifact — see [`stakeholder-decisions.md`](./stakeholder-decisions.md).
 
 ### Locked sprint mode (2026-05-05)
 
@@ -162,6 +162,13 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 - USB hardware unreliable on demo machine — stage button simulates the perception event.
 - Groq latency unpredictable — assistant has a 5s timeout with a labeled fallback message.
 - Two-device dependency risk — pre-stage both student/admin laptops and verify proposer/approver identity chain before rehearsal starts.
+
+### Current implementation notes (2026-05-05 pause)
+
+- Shared backend groundwork is in place: Electron main now supports Supabase-backed queue/audit/blocklist with local fallback.
+- Node 20/Electron compatibility blocker for Supabase was resolved using `ws` transport.
+- Right-rail quick prompts were intentionally removed to reduce UI clutter.
+- Toast notifications now auto-dismiss with a fade-out transition.
 
 ---
 
