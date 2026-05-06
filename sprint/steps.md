@@ -491,7 +491,7 @@ git tag day-4-green
 
 ## §5 Day 5 — Build + Rehearse
 
-### 5.1 (Optional) Produce a portable `.exe`
+### 5.1 (Required) Produce a portable `.exe`
 
 ```bash
 pnpm build:win
@@ -504,9 +504,28 @@ pnpm rebuild:native
 pnpm build:win
 ```
 
-If it still fails, ship the dev-mode launcher instead (§5.2).
+If it still fails, keep SQLite deferred and continue packaging with local JSON fallback; use dev launcher only as emergency Plan B.
 
-### 5.2 Dev-mode launcher (fallback or primary)
+### 5.1b Bundle Python sidecar for packaged mode
+
+Build `python-service/service.exe` and ensure Electron packaged mode starts this binary from `extraResources/python-service/service.exe`.
+
+Required outcome:
+
+- Packaged `.exe` launches without system Python installed.
+- Sidecar endpoints (`/health`, `/ai-task`, `/scan-file`) are reachable in packaged run.
+
+### 5.1c Packaging readiness gate
+
+Before rehearsal, verify in packaged mode:
+
+1. Sidecar check: healthy.
+2. Groq check: configured and callable.
+3. Supabase check: reachable for shared-state reads/writes.
+
+If any check fails, fix and rebuild before continuing.
+
+### 5.2 Dev-mode launcher (emergency fallback only)
 
 Create `run-demo.bat` at the repo root:
 

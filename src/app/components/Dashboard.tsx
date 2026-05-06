@@ -2,29 +2,24 @@ import { useState, useEffect, useCallback, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import {
   Shield,
-  Wifi,
   User,
   LayoutGrid,
   Activity,
-  ShieldCheck,
   FileText,
   Bot,
   Inbox,
-  AlertTriangle,
 } from "lucide-react";
 import { NotificationsMenu } from "../providers/NotificationProvider";
-import { AdminCommandCenter } from "./AdminCommandCenter";
+import { AdminCommandCenter, SystemHealthWidget } from "./AdminCommandCenter";
 import { AdminLabProvider } from "../context/AdminLabContext";
 import { LabMonitoringPanel } from "./LabMonitoringPanel";
-import { AccessControlPanel } from "./AccessControlPanel";
 import { AuditTrailsPanel } from "./AuditTrailsPanel";
 import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
 import { ApprovalsQueue } from "./agentic/ApprovalsQueue";
-import { RiskBadge } from "./agentic/RiskBadge";
 import { PythonServiceBadge } from "./PythonServiceBadge";
 import { useElectron } from "../ipc/useElectron";
 import { findDemoUser } from "../auth/demoUsers";
-import { listPending, proposeAction } from "../agentic/approvalQueue";
+import { listPending } from "../agentic/approvalQueue";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
@@ -42,7 +37,6 @@ const navItems = (
 ): NavItem[] => [
   { id: "command-center", label: "COMMAND", icon: <LayoutGrid size={20} /> },
   { id: "lab-monitoring", label: "MONITORING", icon: <Activity size={20} /> },
-  { id: "access-control", label: "ACCESS", icon: <ShieldCheck size={20} /> },
   { id: "audit-trails", label: "AUDIT", icon: <FileText size={20} /> },
   { id: "assistant", label: "ASSISTANT", icon: <Bot size={20} /> },
   {
@@ -57,13 +51,11 @@ function AdminContent({
   active,
   adminId,
   onApprovalsChange,
-  onNavigate,
   pendingCount,
 }: {
   active: string;
   adminId: string;
   onApprovalsChange?: () => void;
-  onNavigate: (id: string) => void;
   pendingCount: number;
 }) {
   switch (active) {
@@ -81,13 +73,11 @@ function AdminContent({
       );
     case "lab-monitoring":
       return <LabMonitoringPanel />;
-    case "access-control":
-      return <AccessControlPanel />;
     case "audit-trails":
       return <AuditTrailsPanel />;
     case "command-center":
     default:
-      return <AdminCommandCenter onNavigate={onNavigate} pendingCount={pendingCount} />;
+      return <AdminCommandCenter pendingCount={pendingCount} />;
   }
 }
 
@@ -100,6 +90,9 @@ export function Dashboard() {
   const [adminId, setAdminId] = useState("");
   const [adminDisplayName, setAdminDisplayName] = useState("System Administrator");
   const [pendingCount, setPendingCount] = useState(0);
+  const handleHealthResult = useCallback((_ok: boolean | null) => {
+    // Right-pane health widget is informational only in this shell.
+  }, []);
   const refreshPending = useCallback(async () => {
     try {
       const p = await listPending();
@@ -137,23 +130,6 @@ export function Dashboard() {
   const handleLogout = async () => {
     await api.session.clear();
     navigate("/");
-  };
-
-  const triggerHigh = async (type: "wipe_terminal" | "lock_cluster") => {
-    if (!adminId) return;
-    await proposeAction(
-      {
-        type,
-        scope: "lab",
-        reversible: false,
-        payload: { source: "dev_trigger" },
-        confidence: 0.9,
-        reasoning: `Dev-only staging trigger (${type})`,
-      },
-      adminId,
-      "admin",
-    );
-    await refreshPending();
   };
 
   return (
@@ -272,57 +248,19 @@ export function Dashboard() {
                 active={activeNav}
                 adminId={adminId || "admin@runa.edu.ph"}
                 onApprovalsChange={refreshPending}
-                onNavigate={setActiveNav}
                 pendingCount={pendingCount}
               />
             </div>
 
             <aside
               className="flex flex-col border-l border-[#1a2640] shrink-0 py-5 px-4 gap-6 overflow-y-auto min-h-0"
-              style={{ width: "215px", background: "#0a1120" }}
+              style={{ width: "300px", background: "#0a1120" }}
             >
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <span className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
-                    Server Performance
-                  </span>
-                  <div className="w-2 h-2 rounded-full bg-[#4ac77e]" />
-                </div>
-                <div className="mb-4">
-                  <div className="flex justify-between mb-1.5">
-                    <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>CPU Load</span>
-                    <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>18%</span>
-                  </div>
-                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-                    <div className="h-full rounded-full" style={{ width: "18%", background: "#3a6fff" }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex justify-between mb-1.5">
-                    <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>Memory</span>
-                    <span className="text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>6.1 / 32 GB</span>
-                  </div>
-                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-                    <div className="h-full rounded-full" style={{ width: "19%", background: "#3a6fff" }} />
-                  </div>
-                </div>
-              </div>
-
-              <div className="h-[1px] bg-[#1a2640]" />
-
-              <div>
-                <span className="block text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-                  Network
-                </span>
-                <div className="flex items-center gap-2 text-[#c5d5ea]">
-                  <Wifi size={14} className="text-[#4a6fa5]" />
-                  <span style={{ fontSize: "11px", fontFamily: MONO }}>RUNA-ADMIN-NET</span>
-                </div>
-                <div className="flex items-center gap-2 mt-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-[#4ac77e]" />
-                  <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>Encrypted · TLS 1.3</span>
-                </div>
-              </div>
+              <SystemHealthWidget
+                onHealthResult={handleHealthResult}
+                liveStudentCount={0}
+                enabled={activeNav === "command-center"}
+              />
 
               <div className="h-[1px] bg-[#1a2640]" />
 
@@ -356,43 +294,6 @@ export function Dashboard() {
                 </p>
               </div>
 
-              {import.meta.env.DEV && (
-                <>
-                  <div className="h-[1px] bg-[#1a2640]" />
-                  <div>
-                    <span className="block text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>
-                      Agentic preview
-                    </span>
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      <RiskBadge tier="low" compact />
-                      <RiskBadge tier="medium" compact />
-                      <RiskBadge tier="high" compact />
-                    </div>
-                    <p className="text-[#2a3a55] mb-2" style={{ fontSize: "9px", fontFamily: MONO }}>
-                      Queue HIGH-risk proposals for HITL demo.
-                    </p>
-                    <div className="flex flex-col gap-2">
-                      <button
-                        type="button"
-                        onClick={() => triggerHigh("wipe_terminal")}
-                        className="w-full py-2 rounded border border-[#e05c6a40] text-[#e05c6a] hover:bg-[#e05c6a15] text-left px-2"
-                        style={{ fontSize: "9px", fontFamily: MONO }}
-                      >
-                        <AlertTriangle size={12} className="inline mr-1 align-text-bottom" />
-                        Trigger wipe_terminal
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => triggerHigh("lock_cluster")}
-                        className="w-full py-2 rounded border border-[#e8821a40] text-[#e8821a] hover:bg-[#e8821a15] text-left px-2"
-                        style={{ fontSize: "9px", fontFamily: MONO }}
-                      >
-                        Trigger lock_cluster
-                      </button>
-                    </div>
-                  </div>
-                </>
-              )}
             </aside>
           </div>
         </main>
@@ -412,38 +313,15 @@ export function Dashboard() {
               System Protection Active
             </span>
           </div>
-          <div className="flex items-center gap-1 min-w-0">
-          {items.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActiveNav(item.id)}
-              className="relative flex flex-col items-center px-3 pb-1 pt-0.5 transition-colors"
-              style={{ color: activeNav === item.id ? "#7eb5f5" : "#4a6080" }}
-              title={item.label}
-            >
-              <span style={{ display: "flex", transform: "scale(0.72)", transformOrigin: "center" }}>
-                {item.icon}
-              </span>
-              {item.badge !== undefined && item.badge > 0 && (
-                <span
-                  className="absolute top-0 right-1 min-w-[12px] h-[12px] rounded-full flex items-center justify-center text-white"
-                  style={{ fontSize: "7px", background: "#e05c6a" }}
-                >
-                  {item.badge > 9 ? "+" : item.badge}
-                </span>
-              )}
-              {activeNav === item.id && (
-                <div
-                  className="absolute bottom-0 left-1/2 -translate-x-1/2 w-5 h-[2px] rounded-full"
-                  style={{ background: "#3a6fff" }}
-                />
-              )}
-            </button>
-          ))}
-          </div>
+          <span className="text-[#4a6080] tracking-widest uppercase" style={{ fontSize: "9px", fontFamily: MONO }}>
+            Use left rail for navigation
+          </span>
         </div>
 
         <div className="flex items-center gap-4">
+          <span className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>
+            Governed automation: MEDIUM/HIGH actions require HITL approval
+          </span>
           <div className="flex items-center gap-1.5 text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
             <Shield size={11} />
             <span className="tracking-widest uppercase">ADMIN</span>

@@ -11,8 +11,6 @@ import {
 import path from "path";
 import { spawn, ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import WsWebSocket from "ws";
 const Store = require("electron-store");
 import fsSync from "fs";
 import {
@@ -23,8 +21,18 @@ import {
 } from "./runaFiles";
 
 function loadRootEnvFile(): void {
-  const envPath = path.join(process.cwd(), ".env");
-  if (!fsSync.existsSync(envPath)) return;
+  const candidates = [
+    // Portable-mode first: .env beside the running executable
+    path.join(path.dirname(process.execPath), ".env"),
+    // Packaged resources fallback
+    path.join(process.resourcesPath, ".env"),
+    // Dev-mode and workspace fallbacks
+    path.join(process.cwd(), ".env"),
+    path.join(app.getAppPath(), ".env"),
+    path.join(path.dirname(app.getAppPath()), ".env"),
+  ];
+  const envPath = candidates.find((p) => fsSync.existsSync(p));
+  if (!envPath) return;
   try {
     const raw = fsSync.readFileSync(envPath, "utf8");
     for (const line of raw.split(/\r?\n/)) {
@@ -38,6 +46,7 @@ function loadRootEnvFile(): void {
         process.env[key] = value;
       }
     }
+    console.log(`[main] Loaded environment variables from ${envPath}`);
   } catch (e) {
     console.warn("[main] Failed loading root .env:", e);
   }
@@ -106,11 +115,20 @@ interface ApprovalRequest {
   requesterId: string;
   requesterRole: Role;
   action: AgentAction;
-  riskTier: "high";
+  riskTier: RiskTier;
   evidence?: ApprovalEvidence;
   status: ApprovalStatus;
   decision?: ApprovalDecision;
   comments?: ApprovalComment[];
+}
+
+type ExecutionStatus = "executed" | "rejected" | "hard_failed" | "simulated";
+
+interface ActionExecutionResult {
+  ok: boolean;
+  status: ExecutionStatus;
+  message: string;
+  evidence?: Record<string, unknown>;
 }
 
 interface AuditRow {
@@ -263,31 +281,51 @@ function migrateLabShortcuts(): void {
 const AUDIT_LIMIT = 500;
 const QUEUE_LIMIT = 100;
 const CONFIDENCE_THRESHOLD = 0.7;
-const SUPABASE_URL = process.env.SUPABASE_URL?.trim() ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
-let supabaseClient: SupabaseClient | null = null;
-let supabaseWarned = false;
+const CLOUD_ENDPOINTS = {
+  // Demo cloud migration: set your deployed Lambda Function URLs here.
+  approvals: "https://xvmsr6zgkb7p44xjv6frcktxoi0yunah.lambda-url.ap-southeast-1.on.aws/",
+  audit: "https://zypg5u4vstffgujnvbp4yxtaly0hoill.lambda-url.ap-southeast-1.on.aws/",
+  policy: "https://ayjccryrs24b7ckhiol3b7mrlm0xobcp.lambda-url.ap-southeast-1.on.aws/",
+} as const;
 
-function getSupabaseClient(): SupabaseClient | null {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    if (!supabaseWarned) {
-      console.warn(
-        "[main] Supabase backend disabled (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY).",
-      );
-      supabaseWarned = true;
-    }
-    return null;
+const CLOUD_TIMEOUT_MS = 15_000;
+
+async function cloudCall<T>(
+  url: string,
+  body: Record<string, unknown>,
+  method: "POST" | "GET" = "POST",
+): Promise<T> {
+  if (!url || url.includes("REPLACE_")) {
+    throw new Error("Cloud endpoint URL is not configured in electron/main.ts.");
   }
-  if (!supabaseClient) {
-    // Node 20 in Electron does not provide native WebSocket required by supabase realtime client.
-    // We only use PostgREST here, but Supabase still initializes realtime on client creation.
-    supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
-      realtime: { transport: WsWebSocket as unknown as typeof WebSocket },
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), CLOUD_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: method === "GET" ? undefined : JSON.stringify(body),
+      signal: controller.signal,
     });
-    console.log("[main] Supabase backend enabled for shared queue/audit/policy.");
+    const text = await res.text();
+    let parsed: unknown = {};
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new Error(`Cloud endpoint returned non-JSON response (${res.status}).`);
+      }
+    }
+    if (!res.ok) {
+      const msg = typeof parsed === "object" && parsed && "error" in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return parsed as T;
+  } finally {
+    clearTimeout(t);
   }
-  return supabaseClient;
 }
 
 const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
@@ -343,68 +381,52 @@ function fromIsoMaybe(v: string | null | undefined, fallback = Date.now()): numb
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-async function listApprovalsRemote(): Promise<ApprovalRequest[] | null> {
-  const client = getSupabaseClient();
-  if (!client) return null;
+async function listApprovalsRemote(): Promise<ApprovalRequest[]> {
   try {
-    const { data, error } = await client
-      .from("approval_requests")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(QUEUE_LIMIT);
-    if (error) throw error;
-    const rows = (data ?? []).map((row) => {
-      const requesterRole: Role = row.requester_role === "admin" ? "admin" : "student";
+    const response = await cloudCall<{ ok?: boolean; rows?: unknown[] }>(
+      CLOUD_ENDPOINTS.approvals,
+      { op: "list", limit: QUEUE_LIMIT },
+    );
+    const incoming = Array.isArray(response.rows) ? response.rows : [];
+    const rows = incoming.map((row) => {
+      const r = row as Record<string, unknown>;
+      const requesterRole: Role = r.requesterRole === "admin" ? "admin" : "student";
       return {
-      id: String(row.id),
-      createdAt: fromIsoMaybe(row.created_at),
-      requesterId: String(row.requester_id),
+      id: String(r.id ?? ""),
+      createdAt: typeof r.createdAt === "number" ? r.createdAt : fromIsoMaybe(String(r.createdAt ?? "")),
+      requesterId: String(r.requesterId ?? ""),
       requesterRole,
-      action: row.action as AgentAction,
-      riskTier: "high" as const,
-      evidence: (row.evidence ?? undefined) as ApprovalEvidence | undefined,
-      status: row.status as ApprovalStatus,
-      decision: (row.decision ?? undefined) as ApprovalDecision | undefined,
-      comments: (row.comments ?? undefined) as ApprovalComment[] | undefined,
+      action: r.action as AgentAction,
+      riskTier: (r.riskTier ?? "high") as RiskTier,
+      evidence: (r.evidence ?? undefined) as ApprovalEvidence | undefined,
+      status: (r.status ?? "pending") as ApprovalStatus,
+      decision: (r.decision ?? undefined) as ApprovalDecision | undefined,
+      comments: (r.comments ?? undefined) as ApprovalComment[] | undefined,
       };
     });
     return rows.sort((a, b) => b.createdAt - a.createdAt);
   } catch (e) {
-    console.error("[main] Supabase listApprovalsRemote failed:", e);
-    return null;
+    console.error("[main] Cloud listApprovals failed:", e);
+    throw new Error(`Cloud approvals unavailable: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 async function upsertApprovalsRemote(rows: ApprovalRequest[]): Promise<void> {
-  const client = getSupabaseClient();
-  if (!client) return;
-  const payload = rows.slice(-QUEUE_LIMIT).map((r) => ({
-    id: r.id,
-    created_at: new Date(r.createdAt).toISOString(),
-    requester_id: r.requesterId,
-    requester_role: r.requesterRole,
-    action: r.action,
-    risk_tier: r.riskTier,
-    evidence: r.evidence ?? null,
-    status: r.status,
-    decision: r.decision ?? null,
-    comments: r.comments ?? null,
-  }));
   try {
-    const { error } = await client.from("approval_requests").upsert(payload);
-    if (error) throw error;
+    await cloudCall(
+      CLOUD_ENDPOINTS.approvals,
+      { op: "upsert", rows: rows.slice(-QUEUE_LIMIT) },
+    );
   } catch (e) {
-    console.error("[main] Supabase upsertApprovalsRemote failed:", e);
+    console.error("[main] Cloud upsertApprovals failed:", e);
+    throw new Error(`Cloud approvals write failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 async function readQueueShared(): Promise<ApprovalRequest[]> {
   const remote = await listApprovalsRemote();
-  if (remote) {
-    setQueue(remote);
-    return remote;
-  }
-  return getQueue();
+  setQueue(remote);
+  return remote;
 }
 
 async function writeQueueShared(rows: ApprovalRequest[]): Promise<void> {
@@ -436,118 +458,96 @@ function logEvent(row: Omit<AuditRow, "id" | "createdAt"> & { id?: number; creat
   return full;
 }
 
-async function listAuditRemote(limit = 200): Promise<AuditRow[] | null> {
-  const client = getSupabaseClient();
-  if (!client) return null;
+async function listAuditRemote(limit = 200): Promise<AuditRow[]> {
   try {
-    const { data, error } = await client
-      .from("audit_log")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(limit);
-    if (error) throw error;
-    return (data ?? []).map((row, idx) => ({
-      id: Number(row.id ?? idx + 1),
-      createdAt: fromIsoMaybe(row.created_at),
-      eventType: String(row.event_type ?? "unknown"),
-      actorUserId: String(row.actor_user_id ?? "unknown"),
-      actorRole: (row.actor_role ?? "system") as ActorRole,
-      detail: String(row.detail ?? ""),
-      approvalId: row.approval_id ?? undefined,
-      approverUserId: row.approver_user_id ?? undefined,
-      riskTier: (row.risk_tier ?? undefined) as RiskTier | undefined,
-      confidenceScore:
-        typeof row.confidence_score === "number" ? row.confidence_score : undefined,
-    }));
+    const response = await cloudCall<{ ok?: boolean; rows?: unknown[] }>(
+      CLOUD_ENDPOINTS.audit,
+      { op: "list", limit },
+    );
+    const incoming = Array.isArray(response.rows) ? response.rows : [];
+    return incoming.map((row, idx) => {
+      const r = row as Record<string, unknown>;
+      return {
+        id: Number(r.id ?? idx + 1),
+        createdAt:
+          typeof r.createdAt === "number" ? r.createdAt : fromIsoMaybe(String(r.createdAt ?? "")),
+        eventType: String(r.eventType ?? "unknown"),
+        actorUserId: String(r.actorUserId ?? "unknown"),
+        actorRole: (r.actorRole ?? "system") as ActorRole,
+        detail: String(r.detail ?? ""),
+        approvalId: (r.approvalId as string | undefined) ?? undefined,
+        approverUserId: (r.approverUserId as string | undefined) ?? undefined,
+        riskTier: (r.riskTier as RiskTier | undefined) ?? undefined,
+        confidenceScore:
+          typeof r.confidenceScore === "number" ? r.confidenceScore : undefined,
+      };
+    });
   } catch (e) {
-    console.error("[main] Supabase listAuditRemote failed:", e);
-    return null;
+    console.error("[main] Cloud listAudit failed:", e);
+    throw new Error(`Cloud audit unavailable: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 async function insertAuditRemote(row: AuditRow): Promise<void> {
-  const client = getSupabaseClient();
-  if (!client) return;
   try {
-    const { error } = await client.from("audit_log").insert({
-      created_at: new Date(row.createdAt).toISOString(),
-      event_type: row.eventType,
-      actor_user_id: row.actorUserId,
-      actor_role: row.actorRole,
-      detail: row.detail,
-      approval_id: row.approvalId ?? null,
-      approver_user_id: row.approverUserId ?? null,
-      risk_tier: row.riskTier ?? null,
-      confidence_score: row.confidenceScore ?? null,
-    });
-    if (error) throw error;
+    await cloudCall(CLOUD_ENDPOINTS.audit, { op: "insert", row });
   } catch (e) {
-    console.error("[main] Supabase insertAuditRemote failed:", e);
+    console.error("[main] Cloud insertAudit failed:", e);
+    throw new Error(`Cloud audit write failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
-async function listBlockedDomainsRemote(): Promise<string[] | null> {
-  const client = getSupabaseClient();
-  if (!client) return null;
+async function listBlockedDomainsRemote(): Promise<string[]> {
   try {
-    const { data, error } = await client
-      .from("blocked_domains")
-      .select("domain")
-      .order("created_at", { ascending: false });
-    if (error) throw error;
+    const response = await cloudCall<{ ok?: boolean; domains?: unknown[] }>(
+      CLOUD_ENDPOINTS.policy,
+      { op: "list_blocked_domains" },
+    );
+    const incoming = Array.isArray(response.domains) ? response.domains : [];
     return Array.from(
       new Set(
-        (data ?? [])
-          .map((row) => normalizeDomain(String(row.domain ?? "")))
+        incoming
+          .map((row) => normalizeDomain(String(row)))
           .filter(Boolean),
       ),
     );
   } catch (e) {
-    console.error("[main] Supabase listBlockedDomainsRemote failed:", e);
-    return null;
+    console.error("[main] Cloud listBlockedDomains failed:", e);
+    throw new Error(`Cloud policy unavailable: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 async function upsertBlockedDomainRemote(domain: string): Promise<void> {
-  const client = getSupabaseClient();
-  if (!client) return;
   try {
-    const { error } = await client.from("blocked_domains").upsert({
-      domain,
-      updated_at: new Date().toISOString(),
-    });
-    if (error) throw error;
+    await cloudCall(CLOUD_ENDPOINTS.policy, { op: "upsert_blocked_domain", domain });
   } catch (e) {
-    console.error("[main] Supabase upsertBlockedDomainRemote failed:", e);
+    console.error("[main] Cloud upsertBlockedDomain failed:", e);
+    throw new Error(`Cloud policy write failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 async function readBlockedDomainsShared(): Promise<string[]> {
   const remote = await listBlockedDomainsRemote();
-  if (remote) {
-    store.set("blockedDomains", remote);
-    return remote;
-  }
-  const rows = store.get("blockedDomains") as string[] | undefined;
-  return Array.isArray(rows) ? rows : [];
+  store.set("blockedDomains", remote);
+  return remote;
 }
 
 function findRequest(id: string): ApprovalRequest | undefined {
   return getQueue().find((r) => r.id === id);
 }
 
-function executeAction(action: AgentAction): { ok: boolean; message: string } {
+function executeAction(action: AgentAction): ActionExecutionResult {
   console.log("[main] executeAction", action.type, JSON.stringify(action.payload));
 
   if (action.type === "runa_create_folder") {
     const rel = String(action.payload.relativePath ?? "").trim();
     const resolved = resolveUnderVault(app, rel);
-    if (!resolved.ok) return { ok: false, message: resolved.error };
+    if (!resolved.ok) return { ok: false, status: "hard_failed", message: resolved.error };
     try {
       fsSync.mkdirSync(resolved.absolute, { recursive: true });
-      return { ok: true, message: `Created folder under Runa_Folder: ${rel || "."}` };
+      return { ok: true, status: "executed", message: `Created folder under Runa_Folder: ${rel || "."}` };
     } catch (e) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: "hard_failed", message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -556,16 +556,20 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
     const content = String(action.payload.content ?? "");
     const buf = Buffer.from(content, "utf8");
     if (buf.length > MAX_TEXT_FILE_BYTES) {
-      return { ok: false, message: `File exceeds maximum size (${MAX_TEXT_FILE_BYTES} bytes).` };
+      return {
+        ok: false,
+        status: "hard_failed",
+        message: `File exceeds maximum size (${MAX_TEXT_FILE_BYTES} bytes).`,
+      };
     }
     const resolved = resolveUnderVault(app, rel);
-    if (!resolved.ok) return { ok: false, message: resolved.error };
+    if (!resolved.ok) return { ok: false, status: "hard_failed", message: resolved.error };
     try {
       fsSync.mkdirSync(path.dirname(resolved.absolute), { recursive: true });
       fsSync.writeFileSync(resolved.absolute, buf, { encoding: "utf8" });
-      return { ok: true, message: `Wrote file under Runa_Folder: ${rel}` };
+      return { ok: true, status: "executed", message: `Wrote file under Runa_Folder: ${rel}` };
     } catch (e) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: "hard_failed", message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -574,20 +578,21 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
     const toRel = String(action.payload.toRelative ?? "").trim();
     const a = resolveUnderVault(app, fromRel);
     const b = resolveUnderVault(app, toRel);
-    if (!a.ok) return { ok: false, message: a.error };
-    if (!b.ok) return { ok: false, message: b.error };
+    if (!a.ok) return { ok: false, status: "hard_failed", message: a.error };
+    if (!b.ok) return { ok: false, status: "hard_failed", message: b.error };
     try {
       fsSync.mkdirSync(path.dirname(b.absolute), { recursive: true });
       fsSync.renameSync(a.absolute, b.absolute);
-      return { ok: true, message: `Moved within Runa_Folder: ${fromRel} → ${toRel}` };
+      return { ok: true, status: "executed", message: `Moved within Runa_Folder: ${fromRel} → ${toRel}` };
     } catch (e) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: "hard_failed", message: e instanceof Error ? e.message : String(e) };
     }
   }
 
   if (action.type === "student_hitl_escalation") {
     return {
       ok: true,
+      status: "executed",
       message:
         "Request recorded. Lab staff will follow up — Runa cannot send email, submit coursework, or change policies autonomously.",
     };
@@ -597,7 +602,11 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
     const candidate = String(action.payload.domain ?? action.payload.url ?? "").trim();
     const domain = normalizeDomain(candidate);
     if (!domain) {
-      return { ok: false, message: "Cannot enforce blocklist: missing valid domain/url." };
+      return {
+        ok: false,
+        status: "hard_failed",
+        message: "Cannot enforce blocklist: missing valid domain/url.",
+      };
     }
     const current = store.get("blockedDomains") as string[] | undefined;
     const list = Array.isArray(current) ? current : [];
@@ -605,7 +614,12 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
       store.set("blockedDomains", [...list, domain]);
     }
     void upsertBlockedDomainRemote(domain);
-    return { ok: true, message: `Blocklist enforced for domain: ${domain}` };
+    return {
+      ok: true,
+      status: "executed",
+      message: `Blocklist enforced for domain: ${domain}`,
+      evidence: { domain },
+    };
   }
 
   if (action.type === "quarantine_usb") {
@@ -625,7 +639,12 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
         approvalId,
       },
     ]);
-    return { ok: true, message: `USB quarantined: ${device}` };
+    return {
+      ok: true,
+      status: "executed",
+      message: `USB quarantined: ${device}`,
+      evidence: { device, reason, approvalId: approvalId ?? null },
+    };
   }
 
   if (
@@ -634,10 +653,14 @@ function executeAction(action: AgentAction): { ok: boolean; message: string } {
     action.type === "terminate_session" ||
     action.type === "force_logout"
   ) {
-    return { ok: false, message: `${action.type} is not implemented in this build (hard-fail).` };
+    return {
+      ok: false,
+      status: "hard_failed",
+      message: `${action.type} is not implemented in this build (hard-fail).`,
+    };
   }
 
-  return { ok: true, message: `Executed non-sensitive action: ${action.type}` };
+  return { ok: true, status: "simulated", message: `Simulated non-sensitive action: ${action.type}` };
 }
 
 // ─────────────────────────────────────────────
@@ -654,6 +677,7 @@ function startPythonService(): void {
   try {
     const isPacked = app.isPackaged;
     const serviceExe = path.join(process.resourcesPath, "python-service", "service.exe");
+    const packedScriptPath = path.join(process.resourcesPath, "python-service", "service.py");
     // Compiled main lives in dist-electron/electron/ — repo root is two levels up.
     const scriptPath = path.join(__dirname, "..", "..", "python-service", "service.py");
 
@@ -661,8 +685,22 @@ function startPythonService(): void {
     let args: string[];
 
     if (isPacked) {
-      cmd = serviceExe;
-      args = [];
+      if (fsSync.existsSync(serviceExe)) {
+        cmd = serviceExe;
+        args = [];
+      } else if (fsSync.existsSync(packedScriptPath)) {
+        const pythonExe = process.env.PCU_PYTHON_EXE || (process.platform === "win32" ? "python" : "python3");
+        cmd = pythonExe;
+        args = [packedScriptPath];
+        console.warn(
+          `[main] Packaged service.exe missing at ${serviceExe}; falling back to script mode (${packedScriptPath}).`,
+        );
+      } else {
+        console.warn(
+          `[main] Packaged Python sidecar missing. Expected ${serviceExe} or ${packedScriptPath} — sidecar disabled.`,
+        );
+        return;
+      }
     } else if (!fsSync.existsSync(scriptPath)) {
       console.warn(`[main] Python service script not found at ${scriptPath} — sidecar disabled.`);
       return;
@@ -742,7 +780,8 @@ function createMainWindow(): BrowserWindow {
     win.loadURL(VITE_DEV_SERVER_URL);
     win.webContents.openDevTools({ mode: "detach" });
   } else {
-    win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    // dist-electron output lives in dist-electron/electron/, while renderer build is in dist/
+    win.loadFile(path.join(__dirname, "..", "..", "dist", "index.html"));
   }
 
   // Intercept navigation – prevent leaving the app in kiosk mode
@@ -1276,14 +1315,14 @@ function registerIpcHandlers(): void {
       const { action, requesterId, requesterRole, evidence } = args;
       const tier = classifyAction(action);
 
-      if (tier === "high") {
+      if (tier === "high" || tier === "medium") {
         const request: ApprovalRequest = {
           id: randomUUID(),
           createdAt: Date.now(),
           requesterId,
           requesterRole,
           action,
-          riskTier: "high",
+          riskTier: tier,
           evidence,
           status: "pending",
         };
@@ -1295,16 +1334,21 @@ function registerIpcHandlers(): void {
           actorUserId: requesterId,
           actorRole: requesterRole,
           approvalId: request.id,
-          riskTier: "high",
+          riskTier: tier,
           confidenceScore: action.confidence,
         });
-        return { autoExecuted: false, tier: "high" as const, request };
+        return { autoExecuted: false, tier, request };
       }
 
       const result = executeAction(action);
       logEvent({
-        eventType: "action_auto_executed",
-        detail: JSON.stringify({ actionType: action.type, message: result.message }),
+        eventType: result.ok ? "action_executed" : "action_hard_failed",
+        detail: JSON.stringify({
+          actionType: action.type,
+          message: result.message,
+          status: result.status,
+          evidence: result.evidence ?? null,
+        }),
         actorUserId: requesterId,
         actorRole: requesterRole,
         riskTier: tier,
@@ -1336,6 +1380,12 @@ function registerIpcHandlers(): void {
       if (idx === -1) throw new Error("Approval request not found or not pending");
 
       const req = q[idx];
+      const isSelfApproval = req.requesterId === args.approverUserId;
+      const mustSeparateApprover = req.requesterRole === "student";
+      if (isSelfApproval && mustSeparateApprover) {
+        throw new Error("Approver must be different from requester for HITL integrity.");
+      }
+
       const decided: ApprovalDecision = {
         decidedAt: Date.now(),
         decidedByUserId: args.approverUserId,
@@ -1357,18 +1407,31 @@ function registerIpcHandlers(): void {
         actorRole: "admin",
         approvalId: req.id,
         approverUserId: args.approverUserId,
-        riskTier: "high",
+        riskTier: req.riskTier,
       });
 
-      const result = executeAction(req.action);
+      const approvedAction: AgentAction = {
+        ...req.action,
+        payload: {
+          ...req.action.payload,
+          approvalId: req.id,
+          approvedBy: args.approverUserId,
+        },
+      };
+      const result = executeAction(approvedAction);
       logEvent({
-        eventType: "action_executed",
-        detail: JSON.stringify({ approvalId: req.id, message: result.message }),
+        eventType: result.ok ? "action_executed" : "action_hard_failed",
+        detail: JSON.stringify({
+          approvalId: req.id,
+          message: result.message,
+          status: result.status,
+          evidence: result.evidence ?? null,
+        }),
         actorUserId: args.approverUserId,
         actorRole: "admin",
         approvalId: req.id,
         approverUserId: args.approverUserId,
-        riskTier: "high",
+        riskTier: req.riskTier,
       });
 
       return { request: updated, result };
@@ -1384,7 +1447,7 @@ function registerIpcHandlers(): void {
       return { ok: false, blocked: false, domain: "", reason: "invalid_url" as const };
     }
     const blockedDomains = await readBlockedDomainsShared();
-    const blocked = blockedDomains.includes(domain);
+    const blocked = blockedDomains.some((d) => domain === d || domain.endsWith(`.${d}`));
     return {
       ok: true,
       blocked,

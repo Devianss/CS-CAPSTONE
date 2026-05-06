@@ -13,7 +13,7 @@ Tick boxes as you go. Each day ends when its **Exit Criterion** passes. If you c
 | Day 1 | **Done** | Tag `day-1-green` — Electron shell, titlebar, session store baseline |
 | Day 2 | **Done** | Tag `day-2-green` — Agentic types/classifier/registry, Approvals Queue, assistant (stub + risk), demo auth, `agent:*` + `audit:*` IPC |
 | Day 3 | **Done** | Tag `day-3-green` — Sidecar spawn, `python:call` GET/POST, `/health` badge, `/ai-task`, `/scan-file`, `/usb-list`, login + file-scan audit, dual Audit Trails surface; **exit criteria manually verified on demo laptop** (2026-05-03) |
-| Day 4 | **Next** | Canonical USB + **real** `executeAction`, Action Timeline, governance/consent (**real** copy), policy-backed overrides — see [`stakeholder-decisions.md`](./stakeholder-decisions.md) |
+| Day 4 | **In Progress** | Canonical USB + **real** `executeAction`, Action Timeline, governance/consent (**real** copy), policy-backed overrides — see [`stakeholder-decisions.md`](./stakeholder-decisions.md) |
 | Day 5 | Pending | **Portable `.exe` is the primary artifact**; `run-demo.bat` = Plan B only |
 
 Granular unchecked boxes in older day sections are **archival**; use the table above plus each day’s **exit criterion** for gating.
@@ -39,6 +39,18 @@ Granular unchecked boxes in older day sections are **archival**; use the table a
 - [x] Student right pane quick prompts removed per UX decision.
 - [x] Toast UX updated: notifications auto-dismiss with fade-out transition.
 - [x] Lint status at pause: clean (no current IDE lint errors).
+
+### Day 4 lock completion checkpoint (2026-05-06)
+
+- [x] MEDIUM+HIGH actions enforced through HITL queue in runtime (policy/doc alignment).
+- [x] Proposer/approver separation guard enforced in `agent:approve`.
+- [x] Consent modal implemented and audited via `consent_given`.
+- [x] Governance language surfaced in admin/student footer + audit minimization copy.
+- [x] URL policy check hardened for shared-domain/subdomain blocking precedence.
+- [x] USB panel now exposes backend readiness state (`ready` / `degraded`) for truthful demo posture.
+- [x] Packaging contract hardening applied (`service.exe` bundle path, icon-path risk removed, electron dependency placement fixed).
+- [x] `npm run build` passes after changes.
+- [ ] `npm run build:win` final portable artifact confirmation (background build still in progress during checkpoint).
 
 ---
 
@@ -279,10 +291,12 @@ git tag day-1-green
 **Exit criterion:** Hand laptop to a stranger, they double-click `RUNA.exe` (or `run-demo.bat`), full demo script completes ≤ 10 min without an unrecovered crash.
 
 ### Morning (≈ 3 h)
-- [ ] (Optional) `npm run build:win` to produce a portable `.exe`.
+- [ ] (Required) `npm run build:win` to produce a portable `.exe`.
   - [ ] If `better-sqlite3` rebuild fails: `npm run rebuild:native && npm run build:win`.
-  - [ ] If still fails: skip — we go dev-mode launcher only.
-- [ ] Test the portable `.exe` on the actual demo laptop. Note antivirus warnings.
+  - [ ] If still fails: keep local fallback storage and continue packaging without SQLite.
+- [ ] Build and include packaged Python sidecar binary (`python-service/service.exe`) in release payload.
+- [ ] Test the portable `.exe` on the actual demo laptop with no local Python install. Note antivirus warnings.
+- [ ] Verify startup readiness checks in packaged mode (sidecar, Groq, Supabase).
 - [ ] Author `run-demo.bat` (§5.2) as primary or backup launcher.
 - [ ] Author `README-DEMO.md` — one-page launch instructions for whoever runs the laptop.
 - [ ] (Stretch) Migrate audit log from electron-store JSON to SQLite (Path A). If risky, defer.

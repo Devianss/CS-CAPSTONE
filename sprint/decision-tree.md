@@ -119,7 +119,7 @@ In defense narration, explicitly state this is a fallback response because Groq 
 
 ---
 
-## §6 Native rebuild fails for `electron-builder` (Day 5)
+## §6 Packaging pipeline fails for `electron-builder` / sidecar bundle (Day 5)
 
 ```mermaid
 flowchart TD
@@ -133,12 +133,52 @@ flowchart TD
     D -- No --> F[Drop SQLite native dep, switch<br/>to electron-store path §2 Path B,<br/>retry build]
     F --> G{Pass now?}
     G -- Yes --> E
-    G -- No --> H[**Cut packaged build entirely**<br/>Ship run-demo.bat as the launcher]
-    C -- No --> I[Read full electron-builder log<br/>If unclear: ship dev launcher]
-    I --> H
+    G -- No --> H{Can Electron app run<br/>but sidecar bundle fails?}
+    H -- Yes --> H1[Rebuild sidecar binary with hidden imports<br/>and include in extraResources]
+    H1 --> A
+    H -- No --> H2[Use run-demo.bat as emergency fallback]
+    C -- No --> I[Read full electron-builder log<br/>If unclear: use run-demo.bat]
+    I --> H2
 ```
 
-**The `run-demo.bat` launcher is just as legitimate as a packaged `.exe` for a thesis demo.** Don't burn Day 5 morning fighting `electron-builder`.
+**Packaging-first rule:** spend the first pass on fixing packaged mode; only use `run-demo.bat` as emergency fallback.
+
+---
+
+## §6b Packaged app launches but feature readiness fails
+
+```mermaid
+flowchart TD
+    A[Portable .exe opens] --> B{Startup checks green?}
+    B -- No --> C{Which check failed?}
+    C -- Sidecar --> C1[Verify bundled python-service/service.exe exists<br/>and spawned process logs]
+    C -- Groq --> C2[Verify GROQ_API_KEY present in demo config]
+    C -- Supabase --> C3[Verify URL/key + network reachability]
+    C1 --> D[Retry packaged run]
+    C2 --> D
+    C3 --> D
+    B -- Yes --> E[Proceed with rehearsal]
+```
+
+---
+
+## §6c electron-builder fails on winCodeSign symlink extraction
+
+Observed error on Win10:
+`Cannot create symbolic link ... A required privilege is not held by the client`.
+
+```mermaid
+flowchart TD
+    A[build:win fails during winCodeSign cache extract] --> B{Developer Mode or admin shell enabled?}
+    B -- No --> C[Enable Windows Developer Mode OR run terminal as Administrator]
+    C --> D[Retry npm run build:win]
+    B -- Yes --> E[Clear electron-builder cache folder and retry]
+    E --> F{Still failing?}
+    F -- Yes --> G[Use release/win-unpacked for rehearsal and keep portable exe as blocked risk]
+    F -- No --> H[Portable exe produced]
+```
+
+**Temporary gate rule:** if this symlink privilege issue blocks portable generation, continue with `release/win-unpacked` for functional gates, then rerun portable build on an elevated machine profile.
 
 ---
 

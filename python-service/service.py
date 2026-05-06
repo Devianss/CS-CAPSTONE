@@ -9,11 +9,11 @@ Endpoints
   POST /scan-file     → ClamAV file scan
   POST /scan-usb      → USB device enumeration + scan
   POST /analyze-url   → URL reputation check
-  POST /ai-task       → Groq chat completion invocation
+  POST /ai-task       → Lambda Function URL proxy
   GET  /health        → liveness check
 
 Install dependencies:
-  pip install flask groq boto3 python-clamd watchdog requests
+  pip install flask python-clamd requests pyusb
 
 Run standalone:
   FLASK_PORT=5001 python service.py
@@ -30,9 +30,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-import boto3  # pyright: ignore[reportMissingImports]
+import requests  # pyright: ignore[reportMissingImports]
 from flask import Flask, jsonify, request
-from groq import Groq  # pyright: ignore[reportMissingImports]
 
 # Optional: install python-clamd for real ClamAV support
 try:
@@ -68,11 +67,12 @@ if env_file.exists():
 
 PORT = int(os.environ.get("FLASK_PORT", 5001))
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
-AI_PROVIDER = os.environ.get("AI_PROVIDER", "groq")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Paste your deployed Lambda Function URL below.
+AI_LAMBDA_URL = "https://7bid3jnr6woju6wnlhufbfw34q0cdnbr.lambda-url.ap-southeast-1.on.aws/"
 MAX_AI_PROMPT_CHARS = 8_000
 MAX_HISTORY_TURNS = 24
 MAX_GROQ_TOKENS = 2_048
+LAMBDA_TIMEOUT_SEC = 20
 
 logging.basicConfig(level=logging.INFO, format="[service] %(message)s")
 log = logging.getLogger(__name__)
@@ -83,9 +83,9 @@ app = Flask(__name__)
 EICAR_MARKER = b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE"
 
 AI_OFFLINE_FALLBACK = (
-    "The AI sidecar is running, but the Groq service could not be reached from this machine "
-    "(missing API key, network policy, or provider access). This is a labeled offline response — "
-    "your message was still received. For the thesis demo, configure GROQ_API_KEY, "
+    "The AI sidecar is running, but the cloud AI provider could not be reached from this machine "
+    "(missing Lambda URL, network policy, or provider access). This is a labeled offline response — "
+    "your message was still received. For the thesis demo, configure AI_LAMBDA_URL "
     "or continue using keyword-based stubs in the UI."
 )
 
@@ -160,9 +160,6 @@ def _enumerate_usb_devices() -> list[dict]:
 # ─────────────────────────────────────────────
 #  AWS clients (lazy-init so startup is fast)
 # ─────────────────────────────────────────────
-_groq_client = None
-_dynamodb = None
-_s3 = None
 _usb_backend = None
 _usb_backend_checked = False
 _usb_backend_warned = False
@@ -195,35 +192,18 @@ def _get_usb_backend():
         return None
 
 
-def get_groq_client():
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-    return _groq_client
-
-
-def dynamodb_client():
-    global _dynamodb
-    if _dynamodb is None:
-        _dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
-    return _dynamodb
-
-
 # ─────────────────────────────────────────────
 #  Health
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
     backend = _get_usb_backend() if USB_AVAILABLE else None
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
     return jsonify(
         status="ok",
         clamd=CLAMD_AVAILABLE,
         usb=USB_AVAILABLE,
         usbBackendReady=backend is not None,
-        aiProvider=AI_PROVIDER,
-        groqConfigured=bool(groq_key),
-        groqModel=GROQ_MODEL,
+        lambdaConfigured=bool(AI_LAMBDA_URL),
         timestamp=time.time(),
     )
 
@@ -333,21 +313,12 @@ def ai_task():
     if len(prompt) > MAX_AI_PROMPT_CHARS:
         return jsonify(ok=False, error=f"prompt too large (>{MAX_AI_PROMPT_CHARS} chars)"), 400
 
-    if AI_PROVIDER.lower() != "groq":
+    if not AI_LAMBDA_URL or "REPLACE_AI_LAMBDA_URL" in AI_LAMBDA_URL:
         return jsonify(
             ok=True,
             response=AI_OFFLINE_FALLBACK,
             source="local_fallback",
-            detail=f"Unsupported AI_PROVIDER={AI_PROVIDER!r}; expected 'groq'.",
-        )
-
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not groq_key:
-        return jsonify(
-            ok=True,
-            response=AI_OFFLINE_FALLBACK,
-            source="local_fallback",
-            detail="Missing GROQ_API_KEY.",
+            detail="AI Lambda URL is not configured in python-service/service.py.",
         )
 
     role = "admin" if role == "admin" else "student"
@@ -396,40 +367,59 @@ def ai_task():
     groq_messages.append({"role": "user", "content": prompt})
 
     try:
-        response = get_groq_client().chat.completions.create(
-            model=GROQ_MODEL,
-            messages=groq_messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
+        lambda_payload = {
+            "prompt": prompt,
+            "system": system_override,
+            "role": role,
+            "tools": tools,
+            "history": history,
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+        }
+        headers = {"Content-Type": "application/json"}
+        res = requests.post(
+            AI_LAMBDA_URL,
+            json=lambda_payload,
+            headers=headers,
+            timeout=LAMBDA_TIMEOUT_SEC,
         )
-        choice = response.choices[0] if response.choices else None
-        text = ((choice.message.content if choice and choice.message else "") or "").strip()
+        if res.status_code >= 400:
+            raise RuntimeError(f"lambda_status_{res.status_code}: {res.text[:240]}")
+        body = res.json() if res.content else {}
+
+        text = str(body.get("response", "")).strip()
+        if not text and isinstance(body.get("body"), dict):
+            nested = body.get("body", {})
+            text = str(nested.get("response", "")).strip()
+            body = nested
         if not text:
-            text = "No response content from model."
-        usage = response.usage
-        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        total_tokens = int(getattr(usage, "total_tokens", input_tokens + output_tokens) or 0)
-        updated_history = messages + [{"role": "assistant", "content": [{"text": text}]}]
-        log.info("ai-task completed (%d chars) via provider=groq model=%s", len(text), GROQ_MODEL)
+            text = "No response content from Lambda provider."
+
+        input_tokens = int(body.get("inputTokens", 0) or 0)
+        output_tokens = int(body.get("outputTokens", 0) or 0)
+        total_tokens = int(body.get("totalTokens", input_tokens + output_tokens) or 0)
+        updated_history = body.get("updatedHistory")
+        if not isinstance(updated_history, list):
+            updated_history = messages + [{"role": "assistant", "content": [{"text": text}]}]
+
+        log.info("ai-task completed (%d chars) via provider=lambda url=%s", len(text), AI_LAMBDA_URL)
         return jsonify(
             ok=True,
             response=text,
-            source="groq",
-            model=GROQ_MODEL,
+            source="lambda",
+            model=body.get("model", "lambda"),
             inputTokens=input_tokens,
             outputTokens=output_tokens,
             totalTokens=total_tokens,
             updatedHistory=updated_history,
         )
     except Exception as e:
-        log.error("Groq error: %s", e)
-        # Always return 200 so the Electron shell can render a labeled fallback during demos.
+        log.error("Lambda AI error: %s", e)
         return jsonify(
             ok=True,
             response=AI_OFFLINE_FALLBACK,
             source="local_fallback",
-            detail=str(e)[:400],
+            detail=f"lambda_error: {str(e)[:360]}",
         )
 
 

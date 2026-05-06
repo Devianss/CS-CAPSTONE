@@ -16,7 +16,7 @@ Day 3  ─── Real Wiring ────────────────  P
                                          /ai-task, /usb-list, audit persistence    [DONE — day-3-green]
 Day 4  ─── Demo Flow + Governance ─────  Canonical USB flow, real executeAction,
                                          Timeline, RA 10173 UI, policy IPC        [IN PROGRESS]
-Day 5  ─── Build + Rehearse ───────────  Portable .exe (primary), dry runs, recovery
+Day 5  ─── Build + Rehearse ───────────  Plug-and-play portable .exe, dry runs, recovery
 ```
 
 **Stakeholder decisions (2026-05-03 + 2026-05-05 lock):** canonical USB-first demo, **real** post-approve execution, **real** blocked-site enforcement, **MEDIUM + HIGH through HITL** for this sprint, proposer/approver on separate devices, compact right-rail with drawer/collapse behavior, Groq on defense laptop, **hybrid local + Supabase shared state**, **`.exe`** as Day 5 primary artifact — see [`stakeholder-decisions.md`](./stakeholder-decisions.md).
@@ -170,16 +170,26 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 - Right-rail quick prompts were intentionally removed to reduce UI clutter.
 - Toast notifications now auto-dismiss with a fade-out transition.
 
+### Current implementation notes (2026-05-06 lock update)
+
+- Runtime HITL policy now enforces both MEDIUM and HIGH through queue approval.
+- Approval integrity guard blocks self-approval to preserve proposer/approver separation.
+- Consent + governance surfaces landed (first-run consent audit + governance footer messaging).
+- URL policy check now enforces deterministic blocked-domain precedence including subdomains.
+- Packaging contract updated: sidecar executable bundled and invalid icon-path dependency removed.
+
 ---
 
-## Day 5 — Build + Rehearse
+## Day 5 — Build + Rehearse (packaging-first)
 
 **Theme:** "Make it portable, then rehearse until it's boring."
 
 ### Deliverables (build track)
 - `electron-builder` config in `package.json` for a `--win portable` target.
 - `npm run build:win` produces `release/RUNA Lab Portal x.x.x.exe` (portable single-file `.exe`). **Stakeholder: this is the primary deliverable**, not an optional stretch.
-- Smoke-test on the demo machine **using the built `.exe`** (AV warnings rehearsed).
+- Sidecar packaging path finalized: packaged app launches bundled `python-service/service.exe` (not system Python).
+- Smoke-test on the demo machine **using only the built `.exe` + internet** (AV warnings rehearsed).
+- Startup readiness checks pass in packaged mode: sidecar reachable, Groq configured, Supabase reachable.
 - (Optional, time-permitting) Migrate audit log from electron-store JSON to SQLite (Path A); add chained row-hash integrity column.
 
 ### Deliverables (rehearsal track)
@@ -194,7 +204,7 @@ This day delivers what the thesis defense will actually score against (SP2/SP3):
 ### Risks addressed
 - Native module rebuild for production (`electron-builder` runs `electron-rebuild`); if it fails, ship the dev launcher.
 - Antivirus quarantining the unsigned `.exe` — instruct the demo operator to right-click → Run anyway, or fall back to dev launcher.
-- Bundling the Python service with PyInstaller is **out of scope**; we ship `python service.py` as a side script and have the dev launcher start it.
+- Bundling sidecar can fail due to hidden imports/spec mismatch; freeze and test on a clean Windows image before final rehearsal.
 
 ---
 

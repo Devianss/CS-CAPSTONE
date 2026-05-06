@@ -34,62 +34,7 @@ const TYPE_CONFIG = {
   info: { icon: Info, color: "#4a6fa5", bg: "#4a6fa518", label: "Info" },
 };
 
-export const INITIAL_NOTIFICATIONS: Notification[] = [
-  {
-    id: "1",
-    type: "security",
-    title: "Login Attempt Detected",
-    message: "New authenticated session started from terminal UNIT-04.",
-    time: new Date(Date.now() - 1000 * 60 * 2),
-    read: false,
-  },
-  {
-    id: "2",
-    type: "system",
-    title: "Session Timer Running",
-    message: "Your session will expire in 2 hours 45 minutes. Save your work.",
-    time: new Date(Date.now() - 1000 * 60 * 5),
-    read: false,
-  },
-  {
-    id: "3",
-    type: "network",
-    title: "Connected to PCU-GUEST-SECURE",
-    message: "Wi-Fi connection established. Encrypted via WPA3.",
-    time: new Date(Date.now() - 1000 * 60 * 8),
-    read: true,
-  },
-  {
-    id: "4",
-    type: "success",
-    title: "Access Code Validated",
-    message: "AES-256 access code authentication successful.",
-    time: new Date(Date.now() - 1000 * 60 * 10),
-    read: true,
-  },
-  {
-    id: "5",
-    type: "warning",
-    title: "Persistent Storage Disabled",
-    message: "System policy prevents saving files locally this session.",
-    time: new Date(Date.now() - 1000 * 60 * 12),
-    read: true,
-  },
-];
-
-// Pool of incoming live notifications
-const LIVE_POOL: Omit<Notification, "id" | "time" | "read">[] = [
-  { type: "system", title: "CPU Spike Detected", message: "CPU usage briefly peaked at 78% on core 3. Now stable." },
-  { type: "network", title: "Network Latency Alert", message: "Ping to gateway increased to 42ms. Monitoring." },
-  { type: "security", title: "Session Integrity Check", message: "Periodic security scan complete. No anomalies found." },
-  { type: "warning", title: "Memory Usage Rising", message: "Memory at 68%. Consider closing unused applications." },
-  { type: "info", title: "Lab Policy Reminder", message: "Reminder: Clear your workspace before session ends." },
-  { type: "success", title: "Auto-Save Complete", message: "Project files backed up to PCU cloud storage." },
-  { type: "system", title: "System Log Updated", message: "Audit trail entry added at current timestamp." },
-  { type: "network", title: "VPN Status Check", message: "VPN is not active. Traffic is routed through PCU-SECURE." },
-  { type: "warning", title: "Session Expiring Soon", message: "Less than 30 minutes remaining in your session." },
-  { type: "security", title: "Firewall Rule Applied", message: "Outbound rule PCU-FW-042 applied to this terminal." },
-];
+export const INITIAL_NOTIFICATIONS: Notification[] = [];
 
 function formatRelativeTime(date: Date): string {
   const diffMs = Date.now() - date.getTime();
@@ -376,9 +321,3 @@ export function NotificationPanel({
 
 // ─── Live pool (used by NotificationProvider) ───────────────────────────────
 
-let nextNotifId = INITIAL_NOTIFICATIONS.length + 1;
-export function takeNextNotificationId(): string {
-  return String(nextNotifId++);
-}
-
-export { LIVE_POOL };

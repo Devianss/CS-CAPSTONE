@@ -582,6 +582,9 @@ export function StudentDashboard() {
         </div>
 
         <div className="flex items-center gap-4 min-w-0 shrink-0">
+          <span className="text-[#2a3a55] hidden md:inline" style={{ fontSize: "9px", fontFamily: MONO }}>
+            Privacy-minimized audit trail active
+          </span>
           <div
             className="px-2.5 py-1 rounded-md border shrink-0"
             style={{

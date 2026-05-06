@@ -31,7 +31,7 @@ export function PythonServiceBadge() {
       }
     };
     void tick();
-    const id = setInterval(() => void tick(), 5000);
+    const id = setInterval(() => void tick(), 15000);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -41,7 +41,7 @@ export function PythonServiceBadge() {
   const dot =
     reachable === null ? "#2a3a55" : reachable ? "#4ac77e" : "#e8821a";
   const label =
-    reachable === null ? "Sidecar …" : reachable ? "Python OK" : "Sidecar offline";
+    reachable === null ? "Security service …" : reachable ? "Security service OK" : "Security service offline";
 
   return (
     <div

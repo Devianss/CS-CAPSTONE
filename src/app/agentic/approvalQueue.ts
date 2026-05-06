@@ -28,7 +28,7 @@ export type ProposeResult =
     }
   | {
       autoExecuted: false;
-      tier: "high";
+      tier: "medium" | "high";
       request: ApprovalRequest;
     };
 

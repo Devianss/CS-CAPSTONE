@@ -14,8 +14,6 @@ import {
   INITIAL_NOTIFICATIONS,
   NotificationPanel,
   type Notification,
-  LIVE_POOL,
-  takeNextNotificationId,
 } from "@/app/components/NotificationPanel";
 
 const GROTESK = "'Space Grotesk', sans-serif";
@@ -184,37 +182,12 @@ export function NotificationsMenu() {
 export function NotificationProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>(INITIAL_NOTIFICATIONS);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const poolIndex = useRef(0);
   const toastSeq = useRef(0);
 
   const unreadCount = useMemo(
     () => notifications.filter((n) => !n.read).length,
     [notifications],
   );
-
-  useEffect(() => {
-    const LIVE_INTERVAL_MS = 26_000;
-    const timer = setInterval(() => {
-      const pool = LIVE_POOL[poolIndex.current % LIVE_POOL.length];
-      poolIndex.current += 1;
-      const newNotif: Notification = {
-        ...pool,
-        id: takeNextNotificationId(),
-        time: new Date(),
-        read: false,
-      };
-      setNotifications((prev) => [newNotif, ...prev]);
-      const tid = `live-${toastSeq.current++}`;
-      setToasts((prev) => {
-        const next = [
-          { id: tid, message: newNotif.title, type: "info" as PushToastType },
-          ...prev,
-        ];
-        return next.slice(0, 5);
-      });
-    }, LIVE_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, []);
 
   const pushToast = useCallback((msg: string, type: PushToastType = "info") => {
     const id = `t-${toastSeq.current++}`;

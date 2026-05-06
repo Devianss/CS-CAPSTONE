@@ -50,7 +50,7 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 - AWS Cognito auth (sessions are local).
 - Real Groq evaluation rigor (a single canned response per tool is acceptable as long as it's labeled).
 - ClamAV install on the demo machine (stub scan with EICAR signature recognition acceptable).
-- Production Windows **MSI/code-signed** installer (still out of scope). **Portable `.exe` via electron-builder is in scope and is the primary Day 5 artifact** per stakeholder decision.
+- Production Windows **MSI installer** (still out of scope). **Portable `.exe` via electron-builder is in scope and is the primary Day 5 artifact** per stakeholder decision.
 - DynamoDB / S3 / QuickSight integration; cross-machine queue federation.
 - Auto-start on boot, code signing, auto-update.
 - Tiered approval timeouts, multi-admin queue federation (Phase 2).
@@ -74,7 +74,7 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 
 ---
 
-## Status snapshot (**as of Day 3 complete + sprint lock refresh** — 2026-05-05)
+## Status snapshot (**as of Day 4 in-progress + packaging prep** — 2026-05-06)
 
 | Layer | State |
 |---|---|
@@ -86,7 +86,16 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 | Demo auth | **Shipped** — `demoUsers.ts` + `LoginPage` → `session.set`; **audit `login` row** on success |
 | Tray icon | **`HAS_ICON` guard** — optional PNG under `src/imports/` |
 
-**Green tags:** `day-1-green`, `day-2-green`, `day-3-green` on the timeline that passed exit criteria. **Next:** Day 4 (canonical USB flow, blocked-site enforcement, governance UI, truthful execution engine, policy IPC, medium=HITL). **Day 5 focus:** **portable `.exe`** as primary artifact ([`stakeholder-decisions.md`](./stakeholder-decisions.md)).
+### Day 4 implementation update (2026-05-06, late)
+
+- Runtime policy lock applied: `MEDIUM` and `HIGH` actions now route through HITL queue in `electron/main.ts`.
+- HITL integrity guard added: approver cannot approve their own request (`requesterId !== approverUserId`).
+- Execution outcomes standardized to `executed`, `hard_failed`, or `simulated`; audit payloads now include outcome status/evidence.
+- Governance consent shipped: first-run consent modal with `consent_given` audit event.
+- Governance copy now visible in admin/student footers and audit panel minimization messaging.
+- Packaging contract updated in `package.json`: sidecar `service.exe` included under `extraResources`, invalid icon path removed, `electron` moved to `devDependencies`.
+
+**Green tags:** `day-1-green`, `day-2-green`, `day-3-green` on the timeline that passed exit criteria. **Current:** Day 4 in progress (canonical USB flow, blocked-site enforcement, governance UI, truthful execution engine, policy IPC, medium=HITL). **Day 5 focus:** **plug-and-play portable `.exe`** with bundled sidecar and startup readiness checks.
 
 ### Locked sprint priorities (2026-05-05)
 
@@ -97,7 +106,16 @@ Anything beyond the above is bonus and explicitly **descoped** below.
 5. Separate proposer/approver devices in demo (student vs admin laptops).
 6. Student right panel remains compact; collapses to drawer on small windows.
 7. Severity-coded user warnings/toasts are mandatory.
-8. Continue with `electron-store` for sprint speed; broad cleanup deferred until post-demo.
+8. Continue with hybrid persistence: local fallback + Supabase shared state for two-runtime demos.
+
+### Packaging pipeline lock (2026-05-06)
+
+1. Day 5 deliverable is **packaging-first**: portable `.exe` must be the main launch path.
+2. Bundle Python sidecar as `python-service/service.exe` for packaged mode (no system Python requirement on demo laptops).
+3. Bundle sidecar dependencies into the sidecar artifact; avoid `pip install` steps on demo machines.
+4. Keep internet-only cloud dependencies explicit: Groq + Supabase must pass startup checks.
+5. Add startup readiness gate in-app (sidecar, Groq, Supabase) before demo run starts.
+6. Retain truthful degraded-mode messaging for unavailable optional capabilities (e.g., ClamAV/USB driver constraints).
 
 ---
 

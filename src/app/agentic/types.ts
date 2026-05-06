@@ -90,8 +90,8 @@ export interface ApprovalRequest {
   requesterId: string;
   requesterRole: AgentRole;
   action: AgentAction;
-  /** Only HIGH-tier actions ever live in the queue. */
-  riskTier: "high";
+  /** Queue now stores MEDIUM and HIGH for mandatory HITL. */
+  riskTier: RiskTier;
   evidence?: ApprovalEvidence;
   status: ApprovalStatus;
   decision?: ApprovalDecision;

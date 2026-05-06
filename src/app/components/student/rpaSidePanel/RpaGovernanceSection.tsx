@@ -31,7 +31,7 @@ export function RpaGovernanceSection() {
             <span className="text-[#e8a83a] font-semibold">Medium</span> — drafts and recommendations (logged).
           </li>
           <li>
-            <span className="text-[#e88888] font-semibold">High</span> — sensitive actions; staff approval first.
+            <span className="text-[#e88888] font-semibold">High</span> — sensitive actions; HITL staff approval is required.
           </li>
         </ul>
         <div className="rounded-md border border-[#2a4060] bg-[#111d30] px-2.5 py-2">

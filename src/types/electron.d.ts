@@ -77,7 +77,7 @@ export interface ElectronApprovalRequest {
   requesterId: string;
   requesterRole: ElectronRole;
   action: ElectronAgentAction;
-  riskTier: "high";
+  riskTier: ElectronRiskTier;
   evidence?: ElectronApprovalEvidence;
   status: ElectronApprovalStatus;
   decision?: ElectronApprovalDecision;
@@ -105,7 +105,7 @@ export type ElectronProposeResult =
     }
   | {
       autoExecuted: false;
-      tier: "high";
+      tier: "medium" | "high";
       request: ElectronApprovalRequest;
     };
 

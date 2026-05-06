@@ -66,18 +66,11 @@ pip install flask groq boto3 python-clamd watchdog requests pyusb
 # pip install pywinusb
 ```
 
-### 3. Configure AI provider credentials
+### 3. Configure AI Lambda URL
 
 ```bash
-# Option A – python-service/.env
-AI_PROVIDER=groq
-GROQ_API_KEY=...
-GROQ_MODEL=llama-3.3-70b-versatile
-
-# Option B – Environment variables
-export AI_PROVIDER=groq
-export GROQ_API_KEY=...
-export GROQ_MODEL=llama-3.3-70b-versatile
+# Lambda Function URL (required for AI)
+AI_LAMBDA_URL=https://<your-lambda-id>.lambda-url.<region>.on.aws/
 ```
 
 ---
@@ -186,7 +179,7 @@ function MyComponent() {
 | `/analyze-url` | POST   | `{ url }`            | `{ suspicious, score }`       |
 | `/ai-task`     | POST   | `{ prompt, system?, role?, tools?, history?, maxTokens?, temperature? }` | `{ ok, response, source, model, inputTokens, outputTokens, totalTokens, updatedHistory }`  |
 
-AI provider defaults to **Groq** using `llama-3.3-70b-versatile`.
+AI provider path uses **Lambda URL proxy only** for the desktop app.
 
 For easiest local setup, copy root `.env.example` to `.env` (project root). Electron now auto-loads root `.env` on startup.
 
@@ -195,13 +188,10 @@ copy .env.example .env
 npm run dev
 ```
 
-## Groq Setup
+## AI Provider Setup
 
-### Required API Key
-Create a Groq API key and set it as `GROQ_API_KEY` in `python-service/.env`.
-
-### Model Selection
-Primary model: `llama-3.3-70b-versatile`.
+Set `AI_LAMBDA_URL` to your deployed Lambda Function URL.
+Groq credentials are stored in Lambda environment variables (server-side only).
 
 ## Supabase Backend Setup (Shared Demo State)
 

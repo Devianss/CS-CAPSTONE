@@ -184,7 +184,7 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
   if (/quarantine.*(usb|drive|removable)/.test(p))
     return {
       text:
-        "I cannot quarantine USB devices directly. HIGH-risk action queued for approval.",
+        "I cannot quarantine USB devices directly. HIGH-risk action queued for HITL approval. Review in the Approvals Queue.",
       proposeActionType: "quarantine_usb",
     };
   if (/block.*(url|website|domain)/.test(p))
@@ -196,30 +196,30 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
   if (/summari[sz]e.*audit|audit.*summary/.test(p))
     return {
       text:
-          "Stub audit summary: in the past 30 minutes I observed N login events, M file scans, and K HITL approvals. The most notable event was the most recent action_proposed row. (Real provider-backed summary lands on Day 3.)",
+          "Audit summary mode: I will summarize recent login, scan, approval, and policy events from the shared audit stream.",
       toolUsed: "summarize_audit",
     };
   if (/explain.*alert|what.*alert/.test(p))
     return {
       text:
-        "Stub alert explanation: I would parse the most recent alert_id from the audit log and explain the security context in plain terms. (Real explanation lands on Day 3.)",
+        "Alert explanation mode: I will interpret the most recent warning/blocked event and provide operator-ready context.",
       toolUsed: "explain_alert",
     };
   if (/recommend|response|action.*to.*(alert|incident)/.test(p))
     return {
       text:
-        "Stub recommendation:\n  1. Quarantine — isolate affected device.\n  2. Investigate — review session and recent USB events.\n  3. Notify — contact the user via lab staff.\nI cannot execute any of these directly; the admin actions them. (Real recommendation lands on Day 3.)",
+        "Recommended response:\n  1. Contain impacted session.\n  2. Review recent scan/URL/USB evidence.\n  3. Escalate high-risk remediation through HITL approvals.\nI cannot execute these directly; admin review is required.",
       toolUsed: "recommend_response",
     };
   if (/draft.*(policy|blocklist)/.test(p))
     return {
       text:
-        "Stub draft: I would produce a copy-pasteable policy entry, e.g. `enforced_blocklist += { domain: 'example.com', reason: '...', added_by: <admin>, added_at: <now> }`. Apply via the admin Access / governance workflow when enabled.",
+        "Policy draft mode: I can prepare a copy-pasteable blocklist/policy entry with domain, rationale, actor, and timestamp.",
       toolUsed: "draft_policy",
     };
   return {
     text:
-      "Stub admin response. Try asking me to summarize the audit log, explain an alert, recommend a response, draft a policy, or propose an action like 'lock the cluster' or 'terminate sessions'.",
+      "Admin assistant ready. Ask me to summarize audit activity, explain alerts, recommend containment steps, draft policy entries, or propose high-risk actions for HITL.",
     toolUsed: "summarize_audit",
   };
 }

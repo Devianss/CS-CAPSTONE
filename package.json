@@ -52,7 +52,6 @@
     "clsx": "2.1.1",
     "cmdk": "1.1.1",
     "date-fns": "3.6.0",
-    "electron": "^31.7.7",
     "electron-store": "^8.2.0",
     "embla-carousel-react": "8.6.0",
     "input-otp": "1.4.2",
@@ -87,6 +86,7 @@
     "better-sqlite3": "^12.9.0",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
+    "electron": "^31.7.7",
     "electron-builder": "^26.8.1",
     "tailwindcss": "4.1.12",
     "typescript": "^5.6.0",
@@ -109,13 +109,13 @@
         "from": "python-service",
         "to": "python-service",
         "filter": [
-          "**/*.py"
+          "**/*.py",
+          "**/service.exe"
         ]
       }
     ],
     "win": {
-      "target": "portable",
-      "icon": "src/imports/image.png"
+      "target": "portable"
     }
   }
 }
