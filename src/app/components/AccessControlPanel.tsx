@@ -5,9 +5,10 @@ import { useElectron } from "../ipc/useElectron";
 import { logAudit, proposeAction } from "../agentic/approvalQueue";
 import { useAdminLab } from "../context/AdminLabContext";
 import { buildAccessNodes, COMLAB_DEFINITIONS, getComlab } from "../data/comlabs";
+import { ADMIN_FONT_MONO, ADMIN_FONT_SANS, ADMIN_HEADER_TITLE_SIZE, ADMIN_PANEL_CLASS, ADMIN_PANEL_STYLE } from "./admin/adminUiTokens";
 
-const MONO = "'Space Mono', monospace";
-const GROTESK = "'Space Grotesk', sans-serif";
+const MONO = ADMIN_FONT_MONO;
+const GROTESK = ADMIN_FONT_SANS;
 
 type NodeStatus = "normal" | "alert" | "offline" | "blocked" | "scanning";
 
@@ -19,15 +20,19 @@ const NODE_STYLE: Record<NodeStatus, { bg: string; border: string; dot: string }
   scanning: { bg: "#101e30", border: "#4ac77e", dot: "#4ac77e" },
 };
 
-const realTimeLogs = [
-  { time: "14:22:11", msg: "STA-03 authenticated (STD-001)", level: "info" },
-  { time: "14:24:08", msg: "ALERT in TRF SPECIAL · 2 PCs", level: "warn" },
-  { time: "14:26:44", msg: "Cluster on TRF SPECIAL · 5 PCs", level: "warn" },
-  { time: "14:28:33", msg: "Security at PC · 0% of Unauthorized", level: "info" },
-  { time: "14:30:02", msg: "Node scan complete · All nominal", level: "success" },
-  { time: "14:31:55", msg: "STA-07 session terminated by admin", level: "warn" },
-  { time: "14:33:10", msg: "AES-256 key rotation successful", level: "success" },
-];
+interface AccessAuditRow {
+  id: number;
+  createdAt: number;
+  eventType: string;
+  actorUserId?: string;
+  actorRole?: string;
+}
+
+interface AccessLogLine {
+  time: string;
+  msg: string;
+  level: "info" | "warn" | "success";
+}
 
 const levelStyle: Record<string, { color: string; prefix: string }> = {
   info:    { color: "#4a6fa5", prefix: "INFO" },
@@ -38,7 +43,20 @@ const levelStyle: Record<string, { color: string; prefix: string }> = {
 export function AccessControlPanel() {
   const api = useElectron();
   const { labId, setLabId } = useAdminLab();
-  const nodes = useMemo(() => buildAccessNodes(getComlab(labId)), [labId]);
+  const [liveStudentIds, setLiveStudentIds] = useState<string[]>([]);
+  const [hasRecentSecurityAlert, setHasRecentSecurityAlert] = useState(false);
+  const nodes = useMemo(() => {
+    const base = buildAccessNodes(getComlab(labId));
+    const liveCount = Math.min(liveStudentIds.length, base.length);
+    const mapped = base.map((n, i) => {
+      if (i < liveCount) return { ...n, status: "normal" as const };
+      return { ...n, status: "offline" as const };
+    });
+    if (hasRecentSecurityAlert && mapped.length > 0) {
+      mapped[0] = { ...mapped[0], status: "alert" as const };
+    }
+    return mapped;
+  }, [hasRecentSecurityAlert, labId, liveStudentIds]);
   const sessionNodes = useMemo(
     () => nodes.filter((n) => n.status === "normal" || n.status === "scanning").length,
     [nodes],
@@ -47,7 +65,8 @@ export function AccessControlPanel() {
   const [terminateConfirm, setTerminateConfirm] = useState(false);
   const [locked, setLocked] = useState(false);
   const [terminated, setTerminated] = useState(false);
-  const [logs, setLogs] = useState(realTimeLogs);
+  const [logs, setLogs] = useState<AccessLogLine[]>([]);
+  const [auditCount, setAuditCount] = useState(0);
   const [actorId, setActorId] = useState("");
   const [fileScanBusy, setFileScanBusy] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
@@ -57,6 +76,8 @@ export function AccessControlPanel() {
       if (s?.userId) setActorId(s.userId);
     });
   }, [api]);
+
+  const latestWarnLog = useMemo(() => logs.find((l) => l.level === "warn") ?? null, [logs]);
 
   const runFileScan = useCallback(async () => {
     const filePath = await api.dialog.openFile();
@@ -136,23 +157,70 @@ export function AccessControlPanel() {
     }
   }, [api, actorId]);
 
-  // Simulate incoming log lines
   useEffect(() => {
-    const msgs = [
-      { msg: "Heartbeat check · All nodes responding", level: "info" },
-      { msg: "STA-12 file transfer blocked by policy", level: "warn" },
-      { msg: "Firewall rule PCU-FW-07 applied", level: "success" },
-    ];
-    let idx = 0;
-    const t = setInterval(() => {
-      const entry = msgs[idx % msgs.length];
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      setLogs((prev) => [{ time: timeStr, ...entry }, ...prev].slice(0, 20));
-      idx++;
-    }, 8000);
-    return () => clearInterval(t);
-  }, []);
+    let alive = true;
+    const PRESENCE_WINDOW_MS = 90_000;
+    const loadAuditLogs = async () => {
+      try {
+        const rows = (await api.audit.list(120)) as AccessAuditRow[];
+        if (!alive) return;
+        const ordered = [...rows].sort((a, b) => b.createdAt - a.createdAt);
+        setAuditCount(ordered.length);
+        const cutoff = Date.now() - PRESENCE_WINDOW_MS;
+        const liveStudents = new Set(
+          ordered
+            .filter(
+              (r) =>
+                r.eventType === "presence_heartbeat" &&
+                r.actorRole === "student" &&
+                typeof r.createdAt === "number" &&
+                r.createdAt >= cutoff,
+            )
+            .map((r) => r.actorUserId ?? "")
+            .filter(Boolean),
+        );
+        setLiveStudentIds(Array.from(liveStudents));
+        setHasRecentSecurityAlert(
+          ordered.some(
+            (r) =>
+              (r.eventType.includes("hard_failed") ||
+                r.eventType.includes("blocked") ||
+                r.eventType.includes("threat")) &&
+              typeof r.createdAt === "number" &&
+              r.createdAt >= cutoff,
+          ),
+        );
+        const nextLogs: AccessLogLine[] = ordered.slice(0, 20).map((row) => {
+          const level: AccessLogLine["level"] =
+            row.eventType.includes("hard_failed") || row.eventType.includes("blocked")
+              ? "warn"
+              : row.eventType.includes("approved") || row.eventType.includes("executed")
+                ? "success"
+                : "info";
+          return {
+            time: new Date(row.createdAt).toLocaleTimeString("en-GB", {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            }),
+            msg: row.eventType.replaceAll("_", " "),
+            level,
+          };
+        });
+        setLogs(nextLogs);
+      } catch {
+        if (!alive) return;
+        setLogs([]);
+        setAuditCount(0);
+      }
+    };
+    void loadAuditLogs();
+    const t = setInterval(() => void loadAuditLogs(), 15_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [api]);
 
   return (
     <div className="h-full overflow-y-auto" style={{ background: "#0d1320", fontFamily: GROTESK }}>
@@ -164,7 +232,7 @@ export function AccessControlPanel() {
             Security Protocol: Active
           </span>
         </div>
-        <h1 className="text-[#c5d5ea]" style={{ fontSize: "26px", letterSpacing: "2px" }}>
+        <h1 className="text-[#c5d5ea]" style={{ fontSize: ADMIN_HEADER_TITLE_SIZE, letterSpacing: "1.5px" }}>
           ACCESS GOVERNANCE
         </h1>
         <div className="flex items-center gap-6 mt-2">
@@ -195,7 +263,7 @@ export function AccessControlPanel() {
       <div className="p-6 grid gap-5" style={{ gridTemplateColumns: "1fr 280px" }}>
         {/* Left: Node Matrix */}
         <div className="space-y-5">
-          <div className="rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+          <div className={`${ADMIN_PANEL_CLASS} p-5`} style={ADMIN_PANEL_STYLE}>
             <div className="flex items-center justify-between mb-5">
               <div className="flex items-center gap-2">
                 <Activity size={14} className="text-[#3a6fff]" />
@@ -237,8 +305,8 @@ export function AccessControlPanel() {
                         )}
                       </div>
                     </div>
-                    <span style={{ color: sty.dot, fontSize: "6px", fontFamily: MONO }}>{node.id}</span>
-                    <span style={{ color: "#2a3a55", fontSize: "6px", fontFamily: MONO }}>{node.label.slice(0, 8)}</span>
+                    <span style={{ color: sty.dot, fontSize: "8px", fontFamily: MONO }}>{node.id}</span>
+                    <span style={{ color: "#2a3a55", fontSize: "8px", fontFamily: MONO }}>{node.label.slice(0, 8)}</span>
                   </div>
                 );
               })}
@@ -246,7 +314,7 @@ export function AccessControlPanel() {
           </div>
 
           {/* Session Integrity */}
-          <div className="rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+          <div className={`${ADMIN_PANEL_CLASS} p-5`} style={ADMIN_PANEL_STYLE}>
             <div className="flex items-center gap-2 mb-5">
               <Shield size={13} className="text-[#3a6fff]" />
               <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>Session Integrity</span>
@@ -264,11 +332,15 @@ export function AccessControlPanel() {
               </div>
               <div>
                 <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>Access Hits</p>
-                <span className="text-[#c5d5ea]" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>1,248</span>
+                <span className="text-[#c5d5ea]" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>
+                  {auditCount}
+                </span>
               </div>
               <div>
-                <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>Solar Nodes</p>
-                <span className="text-[#c5d5ea]" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>82</span>
+                <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>Alert Nodes</p>
+                <span className="text-[#c5d5ea]" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>
+                  {nodes.filter((n) => n.status === "alert").length}
+                </span>
               </div>
             </div>
 
@@ -300,29 +372,31 @@ export function AccessControlPanel() {
           <div className="rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
             <div className="flex items-center gap-2 mb-1">
               <div className="w-1.5 h-1.5 rounded-full bg-[#e05c6a]" />
-              <span className="text-[#e05c6a]" style={{ fontSize: "11px", fontFamily: MONO }}>COMMAND OVERRIDE</span>
+              <span className="text-[#e05c6a]" style={{ fontSize: "11px", fontFamily: MONO }}>GOVERNED ACTIONS</span>
             </div>
             <div className="h-[1px] bg-[#1a2640] mb-4" />
 
-            {/* Lock Cluster */}
+            {/* Contain active sessions */}
             <div
               className="p-4 rounded-lg mb-3 cursor-pointer hover:brightness-110 transition-all border"
               style={{ background: "#162035", borderColor: locked ? "#4ac77e" : "#2a3a55" }}
               onClick={() => setLockConfirm(true)}
             >
               <div className="flex items-center justify-between mb-1">
-                <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>Lock Cluster</span>
+                <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>Contain Active Sessions</span>
                 <Lock size={14} style={{ color: locked ? "#4ac77e" : "#4a6080" }} />
               </div>
               <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
-                {locked ? "Cluster locked · AES-256 secured" : `Freeze all nodes in ${getComlab(labId).label}`}
+                {locked
+                  ? "Containment lock active for live sessions"
+                  : `Temporarily lock active sessions in ${getComlab(labId).label} (HITL for MEDIUM/HIGH)`}
               </p>
               {locked && (
                 <p className="text-[#4ac77e] mt-1" style={{ fontSize: "8px", fontFamily: MONO }}>● ACTIVE</p>
               )}
             </div>
 
-            {/* Terminate All Sessions */}
+            {/* Force sign-out active sessions */}
             <div
               className="p-4 rounded-lg cursor-pointer hover:brightness-110 transition-all border"
               style={{
@@ -333,12 +407,14 @@ export function AccessControlPanel() {
             >
               <div className="flex items-center justify-between mb-1">
                 <span style={{ color: terminated ? "#4a6080" : "#e05c6a", fontSize: "12px" }}>
-                  Terminate All Sessions
+                  Force Sign-out Active Sessions
                 </span>
                 <Power size={14} style={{ color: terminated ? "#4a6080" : "#e05c6a" }} />
               </div>
               <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
-                {terminated ? "All sessions cleared" : "Immediately force-sign all active users"}
+                {terminated
+                  ? "Live sessions signed out"
+                  : "Immediately sign out currently active student sessions (hard-fail if safeguards block execution)"}
               </p>
             </div>
 
@@ -362,7 +438,7 @@ export function AccessControlPanel() {
                 <FileSearch size={14} className="text-[#7eb5f5]" />
               </div>
               <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
-                ClamAV sidecar (EICAR-aware). Dirty files queue quarantine_usb for HITL.
+                ClamAV sidecar scan. Threat findings create governed `quarantine_usb` proposals for HITL.
               </p>
             </div>
 
@@ -374,7 +450,9 @@ export function AccessControlPanel() {
                 Security Notifications
               </p>
               <p className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>
-                Scanning · Runa engine: Standby...
+                {latestWarnLog
+                  ? `Latest warning: ${latestWarnLog.msg}`
+                  : "No active security warnings in the current presence window."}
               </p>
             </div>
           </div>
@@ -411,63 +489,63 @@ export function AccessControlPanel() {
             ))}
           </div>
 
-          {/* Actions Legend */}
           <div className="rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
-            <p className="text-[#4a6080] tracking-widest uppercase mb-4" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Available Actions
+            <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>
+              Governance Notes
             </p>
-            <div className="space-y-3">
-              <div className="flex items-start gap-2">
-                <Lock size={12} className="text-[#3a6fff] mt-0.5" />
-                <div>
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "10px" }}>Lock Node</p>
-                  <p className="text-[#4a6080]" style={{ fontSize: "8px" }}>Freeze terminal access</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-2">
-                <Power size={12} className="text-[#e05c6a] mt-0.5" />
-                <div>
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "10px" }}>Terminate</p>
-                  <p className="text-[#4a6080]" style={{ fontSize: "8px" }}>Force sign-out user</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-2">
-                <Activity size={12} className="text-[#4ac77e] mt-0.5" />
-                <div>
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "10px" }}>Scan Node</p>
-                  <p className="text-[#4a6080]" style={{ fontSize: "8px" }}>Run security check</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-2">
-                <Shield size={12} className="text-[#e8821a] mt-0.5" />
-                <div>
-                  <p className="text-[#c5d5ea]" style={{ fontSize: "10px" }}>Block Access</p>
-                  <p className="text-[#4a6080]" style={{ fontSize: "8px" }}>Restrict permanently</p>
-                </div>
-              </div>
-            </div>
+            <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+              RUNA applies app-context controls only. MEDIUM and HIGH actions are routed through HITL approval.
+              Execution outcomes are logged to the shared audit stream for cross-device traceability.
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Lock Confirm Modal */}
+      {/* Containment confirm modal */}
       {lockConfirm && (
         <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
           <div className="rounded-xl p-6 border shadow-2xl" style={{ background: "#111d30", borderColor: "#2a3a55", width: "340px" }}>
             <div className="flex items-center gap-2 mb-3">
               <Lock size={16} className="text-[#4a6fa5]" />
-              <span className="text-[#c5d5ea]" style={{ fontSize: "14px" }}>Confirm Cluster Lock</span>
+              <span className="text-[#c5d5ea]" style={{ fontSize: "14px" }}>Confirm Session Containment</span>
             </div>
             <p className="text-[#4a6080] mb-5" style={{ fontSize: "11px", fontFamily: MONO }}>
-              {`This will freeze all active nodes in ${getComlab(labId).label}. Students will be unable to interact with terminals until unlocked.`}
+              {`This will lock currently active student sessions in ${getComlab(labId).label}. Use only for active containment.`}
             </p>
             <div className="flex gap-3">
               <button
-                onClick={() => { setLocked(true); setLockConfirm(false); }}
+                onClick={() => {
+                  void (async () => {
+                    const uid = actorId || "admin";
+                    const proposal = await proposeAction(
+                      {
+                        type: "lock_cluster",
+                        scope: "lab",
+                        reversible: true,
+                        payload: { labId },
+                        confidence: 0.88,
+                        reasoning: `Lock cluster requested for ${getComlab(labId).label}.`,
+                      },
+                      uid,
+                      "admin",
+                    );
+                    if (proposal.autoExecuted && proposal.result.ok) {
+                      setLocked(true);
+                      toast.success("Cluster lock executed", { description: proposal.result.message });
+                    } else if (proposal.autoExecuted) {
+                      toast.error("Cluster lock hard-failed", { description: proposal.result.message });
+                    } else {
+                      toast("Cluster lock queued for HITL", {
+                        description: `Approval: ${proposal.request.id.slice(0, 8)}… (${proposal.tier})`,
+                      });
+                    }
+                    setLockConfirm(false);
+                  })();
+                }}
                 className="flex-1 py-2 rounded-md text-white transition-colors"
                 style={{ background: "#3a6fff", fontSize: "11px", fontFamily: MONO }}
               >
-                CONFIRM LOCK
+                APPLY CONTAINMENT
               </button>
               <button
                 onClick={() => setLockConfirm(false)}
@@ -481,24 +559,51 @@ export function AccessControlPanel() {
         </div>
       )}
 
-      {/* Terminate Confirm Modal */}
+      {/* Force sign-out confirm modal */}
       {terminateConfirm && (
         <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
           <div className="rounded-xl p-6 border shadow-2xl" style={{ background: "#1a0d18", borderColor: "#e05c6a50", width: "340px" }}>
             <div className="flex items-center gap-2 mb-3">
               <Power size={16} className="text-[#e05c6a]" />
-              <span className="text-[#e05c6a]" style={{ fontSize: "14px" }}>Terminate All Sessions?</span>
+              <span className="text-[#e05c6a]" style={{ fontSize: "14px" }}>Force Sign-out Active Sessions?</span>
             </div>
             <p className="text-[#a07080] mb-5" style={{ fontSize: "11px", fontFamily: MONO }}>
-              This will immediately force-sign all {sessionNodes} active users. This action is logged and irreversible.
+              This signs out {sessionNodes} active sessions in the selected lab. Use after containment review.
             </p>
             <div className="flex gap-3">
               <button
-                onClick={() => { setTerminated(true); setTerminateConfirm(false); }}
+                onClick={() => {
+                  void (async () => {
+                    const uid = actorId || "admin";
+                    const proposal = await proposeAction(
+                      {
+                        type: "terminate_session",
+                        scope: "lab",
+                        reversible: false,
+                        payload: { labId, sessionNodes },
+                        confidence: 0.9,
+                        reasoning: `Terminate sessions requested for ${getComlab(labId).label}.`,
+                      },
+                      uid,
+                      "admin",
+                    );
+                    if (proposal.autoExecuted && proposal.result.ok) {
+                      setTerminated(true);
+                      toast.success("Termination executed", { description: proposal.result.message });
+                    } else if (proposal.autoExecuted) {
+                      toast.error("Termination hard-failed", { description: proposal.result.message });
+                    } else {
+                      toast("Terminate queued for HITL", {
+                        description: `Approval: ${proposal.request.id.slice(0, 8)}… (${proposal.tier})`,
+                      });
+                    }
+                    setTerminateConfirm(false);
+                  })();
+                }}
                 className="flex-1 py-2 rounded-md text-white transition-colors"
                 style={{ background: "#e05c6a", fontSize: "11px", fontFamily: MONO }}
               >
-                TERMINATE
+                FORCE SIGN-OUT
               </button>
               <button
                 onClick={() => setTerminateConfirm(false)}

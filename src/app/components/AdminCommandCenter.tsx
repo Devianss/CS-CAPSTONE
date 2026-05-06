@@ -1,20 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Activity,
   Bot,
-  ChevronRight,
-  Cloud,
-  Cpu,
-  Database,
   Download,
   FileText,
   Inbox,
-  LayoutGrid,
-  Monitor,
   RefreshCw,
   Shield,
   ShieldAlert,
-  ShieldCheck,
   Usb,
   Users,
 } from "lucide-react";
@@ -23,54 +15,32 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
-  Label,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { COMLAB_SECURITY_FEED, COMLAB_DEFINITIONS, getComlab } from "../data/comlabs";
+import { COMLAB_IDS, buildMonitoringPcs, getComlab, type ComlabId } from "../data/comlabs";
 import { useAdminLab } from "../context/AdminLabContext";
 import { useElectron } from "../ipc/useElectron";
 import { useNotificationContext } from "../providers/NotificationProvider";
+import { ADMIN_COMMAND_PANEL_CLASS, ADMIN_COMMAND_PANEL_STYLE, ADMIN_FONT_MONO, ADMIN_FONT_SANS } from "./admin/adminUiTokens";
 
-const MONO = "'Share Tech Mono', monospace";
-const GROTESK = "'Exo 2', sans-serif";
-const BRAND = "'Orbitron', sans-serif";
+const MONO = ADMIN_FONT_MONO;
+const GROTESK = ADMIN_FONT_SANS;
+const AI_HEALTH_TTL_MS = 120_000;
 
-const OCCUPANCY_DATA = [
-  { lab: "COMLAB 08", occupied: 28, capacity: 40 },
-  { lab: "COMLAB 09", occupied: 35, capacity: 40 },
-  { lab: "COMLAB 10", occupied: 19, capacity: 40 },
-  { lab: "COMLAB 11", occupied: 40, capacity: 40 },
-];
-
-const THREAT_DATA = [
-  { name: "Clean", value: 109, fill: "#4ac77e" },
-  { name: "Warnings", value: 8, fill: "#e8821a" },
-  { name: "Threats", value: 3, fill: "#e05c6a" },
-];
-
-const SERVICES = [
-  { name: "ClamAV Engine", status: "online" as const, icon: Shield },
-  { name: "Python Sidecar", status: "online" as const, icon: Cpu },
-  { name: "USB Monitor", status: "online" as const, icon: Usb },
-  { name: "Groq Inference", status: "degraded" as const, icon: Cloud },
-  { name: "SQLite DB", status: "online" as const, icon: Database },
-];
-
-type ServiceStatus = "online" | "degraded" | "offline";
-
-const AUDIT_SEED = [
-  { type: "login" as const, station: "PC-08-12", user: "STU-2204", msg: "Student session started", ago: 1 },
-  { type: "scan" as const, station: "PC-09-04", user: "SYSTEM", msg: "USB scan completed — clean", ago: 4 },
-  { type: "threat" as const, station: "PC-10-07", user: "SYSTEM", msg: "Malware signature detected", ago: 7 },
-  { type: "lock" as const, station: "PC-08-03", user: "ADMIN", msg: "Station locked by admin", ago: 12 },
-  { type: "login" as const, station: "PC-11-19", user: "STU-1987", msg: "Student session started", ago: 15 },
-];
+type ServiceStatus = "online" | "unknown" | "offline";
+interface CommandAuditRow {
+  id: number;
+  createdAt: number;
+  eventType: string;
+  actorUserId: string;
+  actorRole?: string;
+  detail?: string;
+}
+const PRESENCE_WINDOW_MS = 90_000;
+let aiHealthCache: { at: number; status: ServiceStatus } | null = null;
 
 function formatAgo(minutes: number): string {
   if (minutes < 0.5) return "just now";
@@ -109,8 +79,8 @@ function DashboardKPICard({
 
   return (
     <div
-      className="rounded-[10px] p-5 border flex flex-col gap-3 min-h-0"
-      style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
+      className={`${ADMIN_COMMAND_PANEL_CLASS} p-5 flex flex-col gap-3 min-h-0`}
+      style={ADMIN_COMMAND_PANEL_STYLE}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -144,47 +114,106 @@ function DashboardKPICard({
 
 function statusPillStyle(status: ServiceStatus): { bg: string; fg: string; label: string } {
   if (status === "online") return { bg: "#4ac77e22", fg: "#4ac77e", label: "ONLINE" };
-  if (status === "degraded") return { bg: "#e8821a22", fg: "#e8821a", label: "DEGRADED" };
+  if (status === "unknown") return { bg: "#e8821a22", fg: "#e8821a", label: "UNKNOWN" };
   return { bg: "#e05c6a22", fg: "#e05c6a", label: "OFFLINE" };
 }
 
-function SystemHealthWidget({
+export function SystemHealthWidget({
   onHealthResult,
+  liveStudentCount,
+  enabled = true,
 }: {
   onHealthResult: (ok: boolean | null) => void;
+  liveStudentCount: number;
+  enabled?: boolean;
 }) {
-  const { python } = useElectron();
-  const [rows, setRows] = useState(SERVICES);
+  const api = useElectron();
+  const [rows, setRows] = useState<
+    Array<{ name: string; status: ServiceStatus; icon: typeof Shield }>
+  >([
+    { name: "Security Service", status: "unknown", icon: Shield },
+    { name: "AI Service", status: "unknown", icon: Bot },
+    { name: "Audit Backend", status: "unknown", icon: FileText },
+    { name: "Policy Backend", status: "unknown", icon: Usb },
+    { name: "Student Sessions", status: "unknown", icon: Users },
+  ]);
 
   const fetchHealth = useCallback(async () => {
+    const next: Array<{ name: string; status: ServiceStatus; icon: typeof Shield }> = [
+      { name: "Security Service", status: "unknown", icon: Shield },
+      { name: "AI Service", status: "unknown", icon: Bot },
+      { name: "Audit Backend", status: "unknown", icon: FileText },
+      { name: "Policy Backend", status: "unknown", icon: Usb },
+      { name: "Student Sessions", status: "unknown", icon: Users },
+    ];
+    let securityOnline = false;
     try {
-      const r = await python.call<{ status?: string }>("/health", undefined, {
+      const r = await api.python.call<{ status?: string }>("/health", undefined, {
         method: "GET",
         timeoutMs: 4000,
       });
       const ok = !!(r.ok && r.data && (r.data as { status?: string }).status === "ok");
       onHealthResult(ok);
-      setRows((prev) =>
-        prev.map((s) =>
-          s.name === "Python Sidecar"
-            ? { ...s, status: ok ? ("online" as const) : ("offline" as const) }
-            : s,
-        ),
-      );
+      next[0] = { ...next[0], status: ok ? "online" : "offline" };
+      securityOnline = ok;
     } catch {
       onHealthResult(null);
-      setRows(SERVICES);
+      next[0] = { ...next[0], status: "offline" };
     }
-  }, [python, onHealthResult]);
+    const cached = aiHealthCache;
+    if (!securityOnline) {
+      next[1] = { ...next[1], status: "offline" };
+      aiHealthCache = { at: Date.now(), status: "offline" };
+    } else if (cached && Date.now() - cached.at < AI_HEALTH_TTL_MS) {
+      next[1] = { ...next[1], status: cached.status };
+    } else {
+      try {
+        const ai = await api.python.call<{ ok?: boolean; response?: string; error?: string }>(
+          "/ai-task",
+          {
+            prompt: "health-check",
+            system: "Return one short token.",
+            role: "admin",
+            maxTokens: 8,
+            temperature: 0,
+          },
+          { method: "POST", timeoutMs: 8000 },
+        );
+        const aiStatus: ServiceStatus = ai.ok ? "online" : "offline";
+        next[1] = { ...next[1], status: aiStatus };
+        aiHealthCache = { at: Date.now(), status: aiStatus };
+      } catch {
+        next[1] = { ...next[1], status: "offline" };
+        aiHealthCache = { at: Date.now(), status: "offline" };
+      }
+    }
+    try {
+      await api.audit.list(1);
+      next[2] = { ...next[2], status: "online" };
+    } catch {
+      next[2] = { ...next[2], status: "offline" };
+    }
+    try {
+      await api.security.listBlockedDomains();
+      next[3] = { ...next[3], status: "online" };
+    } catch {
+      next[3] = { ...next[3], status: "offline" };
+    }
+    next[4] = { ...next[4], status: liveStudentCount > 0 ? "online" : "unknown" };
+    setRows(next);
+  }, [api, liveStudentCount, onHealthResult]);
 
   useEffect(() => {
+    if (!enabled) return;
     void fetchHealth();
-  }, [fetchHealth]);
+    const id = window.setInterval(() => void fetchHealth(), 30_000);
+    return () => window.clearInterval(id);
+  }, [enabled, fetchHealth]);
 
   return (
     <div
-      className="rounded-[10px] p-5 border h-full flex flex-col gap-3 min-h-0"
-      style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
+      className={`${ADMIN_COMMAND_PANEL_CLASS} p-5 h-full flex flex-col gap-3 min-h-0`}
+      style={ADMIN_COMMAND_PANEL_STYLE}
     >
       <p className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: GROTESK }}>
         System Health
@@ -197,7 +226,7 @@ function SystemHealthWidget({
             <div key={s.name} className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <Icon size={14} className="text-[#7eb5f5] shrink-0" />
-                <span className="text-[#c5d5ea] truncate" style={{ fontSize: "11px", fontFamily: MONO }}>
+                <span className="text-[#c5d5ea] leading-tight" style={{ fontSize: "11px", fontFamily: MONO }}>
                   {s.name}
                 </span>
               </div>
@@ -227,50 +256,15 @@ function feedDot(type: FeedType): string {
   return "#e8821a";
 }
 
-function LiveAuditFeed() {
-  const { toasts } = useNotificationContext();
-  const [items, setItems] = useState(() =>
-    AUDIT_SEED.map((r, i) => ({
-      id: `seed-${i}`,
-      type: r.type,
-      station: r.station,
-      user: r.user,
-      msg: r.msg,
-      agoMin: r.ago,
-    })),
-  );
-  const prevToastId = useRef<string | null>(null);
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setItems((prev) => prev.map((x) => ({ ...x, agoMin: x.agoMin + 0.5 })));
-    }, 30_000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    const head = toasts[0];
-    if (!head || head.id === prevToastId.current) return;
-    prevToastId.current = head.id;
-    setItems((prev) =>
-      [
-        {
-          id: `toast-${head.id}`,
-          type: "login" as FeedType,
-          station: "—",
-          user: "NOTIFY",
-          msg: head.message,
-          agoMin: 0,
-        },
-        ...prev,
-      ].slice(0, 8),
-    );
-  }, [toasts]);
-
+function LiveAuditFeed({
+  items,
+}: {
+  items: Array<{ id: string; type: FeedType; station: string; user: string; msg: string; agoMin: number }>;
+}) {
   return (
     <div
-      className="rounded-[10px] p-5 border h-full flex flex-col gap-3 min-h-0"
-      style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
+      className={`${ADMIN_COMMAND_PANEL_CLASS} p-5 h-full flex flex-col gap-3 min-h-0`}
+      style={ADMIN_COMMAND_PANEL_STYLE}
     >
       <p className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: GROTESK }}>
         Live Audit Feed
@@ -301,73 +295,232 @@ function LiveAuditFeed() {
     </div>
   );
 }
+function eventToFeedType(eventType: string): FeedType {
+  if (eventType.includes("threat") || eventType.includes("blocked") || eventType.includes("hard_failed")) return "threat";
+  if (eventType.includes("scan")) return "scan";
+  if (eventType.includes("lock") || eventType.includes("terminate")) return "lock";
+  return "login";
+}
 
-const SECURITY_PREVIEW = COMLAB_SECURITY_FEED.slice(0, 3);
-const levelColors: Record<string, string> = {
-  secure: "#4ac77e",
-  critical: "#e05c6a",
-  system: "#4a6fa5",
-};
+function extractStation(detail?: string): string {
+  if (!detail) return "—";
+  try {
+    const parsed = JSON.parse(detail) as Record<string, unknown>;
+    const station = parsed.station ?? parsed.pc ?? parsed.device;
+    return typeof station === "string" ? station : "—";
+  } catch {
+    return "—";
+  }
+}
+
+function describeAuditEvent(row: CommandAuditRow): string {
+  const event = row.eventType;
+  const actor = row.actorUserId || "system";
+  if (event === "presence_heartbeat") return `${actor} reported active session`;
+  if (event.includes("url_blocked")) return `${actor} blocked URL by policy`;
+  if (event.includes("usb_inserted")) return `${actor} inserted USB device`;
+  if (event.includes("usb_scan_complete")) return `${actor} completed USB scan`;
+  if (event.includes("quarantine_usb")) return `${actor} requested USB quarantine`;
+  if (event.includes("containment_requested")) return `${actor} requested session containment`;
+  if (event.includes("approved")) return `Approval decision recorded by ${actor}`;
+  if (event.includes("rejected")) return `Request rejected by ${actor}`;
+  if (event.includes("hard_failed")) return `Action hard-failed and was logged`;
+  if (event.includes("blocked") || event.includes("threat")) return `Security threat event recorded`;
+  return event.replaceAll("_", " ");
+}
 
 export function AdminCommandCenter({
-  onNavigate,
   pendingCount,
 }: {
-  onNavigate: (id: string) => void;
   pendingCount: number;
 }) {
   const { labId, setLabId } = useAdminLab();
   const { pushToast } = useNotificationContext();
-  const lab = getComlab(labId);
+  const electron = useElectron();
   const [lastRefreshed, setLastRefreshed] = useState(() => new Date());
   const [kpiAnimKey, setKpiAnimKey] = useState(0);
-  const [healthTick, setHealthTick] = useState(0);
-
-  const onHealthResult = useCallback((_ok: boolean | null) => {
-    setLastRefreshed(new Date());
-  }, []);
+  const [auditRows, setAuditRows] = useState<CommandAuditRow[]>([]);
 
   const handleRefresh = useCallback(() => {
     setKpiAnimKey((k) => k + 1);
-    setHealthTick((t) => t + 1);
     setLastRefreshed(new Date());
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const loadAudit = async () => {
+      try {
+        const rows = (await electron.audit.list(200)) as CommandAuditRow[];
+        if (!alive) return;
+        setAuditRows(rows.sort((a, b) => b.createdAt - a.createdAt));
+      } catch {
+        if (alive) setAuditRows([]);
+      }
+    };
+    void loadAudit();
+    const t = window.setInterval(() => void loadAudit(), 15_000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [electron]);
+
+  const liveStudentCount = useMemo(() => {
+    const cutoff = Date.now() - PRESENCE_WINDOW_MS;
+    const ids = new Set(
+      auditRows
+        .filter(
+          (r) =>
+            r.eventType === "presence_heartbeat" &&
+            r.actorRole === "student" &&
+            typeof r.createdAt === "number" &&
+            r.createdAt >= cutoff,
+        )
+        .map((r) => r.actorUserId)
+        .filter(Boolean),
+    );
+    return ids.size;
+  }, [auditRows]);
+
+  const occupancyData = useMemo(
+    () =>
+      COMLAB_IDS.map((id) => {
+        const def = getComlab(id);
+        const capacity = buildMonitoringPcs(def).length;
+        const occupied = id === labId ? Math.min(liveStudentCount, capacity) : 0;
+        return { lab: def.label, occupied, capacity };
+      }),
+    [labId, liveStudentCount],
+  );
+
+  const liveFeedItems = useMemo(
+    () =>
+      auditRows.slice(0, 8).map((row) => ({
+        id: String(row.id),
+        type: eventToFeedType(row.eventType),
+        station: extractStation(row.detail),
+        user: row.actorUserId || "SYSTEM",
+        msg: describeAuditEvent(row),
+        agoMin: Math.max(0, (Date.now() - row.createdAt) / 60000),
+      })),
+    [auditRows],
+  );
 
   const kpiRows = useMemo(
     () =>
       [
-        { label: "Active Sessions", value: 47, delta: 8, icon: Users, color: "#3a6fff" },
-        { label: "PCs Online", value: 112, delta: 3, icon: Monitor, color: "#4ac77e" },
-        { label: "Threats Detected", value: 3, delta: -1, icon: ShieldAlert, color: "#e05c6a" },
-        { label: "Pending Approvals", value: pendingCount, delta: 0, icon: Inbox, color: "#e8821a" },
+        {
+          label: "Pending HITL",
+          value: pendingCount,
+          delta: 0,
+          icon: Inbox,
+          color: "#e8821a",
+        },
+        {
+          label: "Critical Events (15m)",
+          value: auditRows.filter(
+            (r) =>
+              r.createdAt >= Date.now() - 15 * 60 * 1000 &&
+              (r.eventType.includes("hard_failed") || r.eventType.includes("blocked") || r.eventType.includes("threat")),
+          ).length,
+          delta: 0,
+          icon: ShieldAlert,
+          color: "#e05c6a",
+        },
+        {
+          label: "Active Sessions (90s)",
+          value: liveStudentCount,
+          delta: 0,
+          icon: Users,
+          color: "#3a6fff",
+        },
       ] as const,
-    [pendingCount],
+    [auditRows, liveStudentCount, pendingCount],
   );
 
-  const modules: { id: string; label: string; icon: typeof Activity; warn?: boolean }[] = useMemo(
-    () => [
-      { id: "lab-monitoring", label: "Monitoring", icon: Activity },
-      { id: "access-control", label: "Access", icon: ShieldCheck },
-      { id: "audit-trails", label: "Audit", icon: FileText },
-      { id: "assistant", label: "Assistant", icon: Bot },
-      { id: "approvals", label: "Approvals", icon: Inbox, warn: pendingCount > 0 },
-    ],
-    [pendingCount],
+  const riskData = useMemo(() => {
+    const riskWindowStart = Date.now() - 60 * 60 * 1000;
+    let low = 0;
+    let medium = 0;
+    let high = 0;
+    for (const row of auditRows) {
+      if (row.createdAt < riskWindowStart) continue;
+      if (row.eventType.includes("hard_failed") || row.eventType.includes("blocked") || row.eventType.includes("threat")) {
+        high += 1;
+      } else if (
+        row.eventType.includes("approved") ||
+        row.eventType.includes("proposed") ||
+        row.eventType.includes("requested")
+      ) {
+        medium += 1;
+      } else {
+        low += 1;
+      }
+    }
+    return [
+      { name: "High", value: high, fill: "#e05c6a" },
+      { name: "Medium", value: medium, fill: "#e8821a" },
+      { name: "Low", value: low, fill: "#4ac77e" },
+    ];
+  }, [auditRows]);
+  const auditEventsLastHour = useMemo(
+    () => auditRows.filter((r) => r.createdAt >= Date.now() - 60 * 60 * 1000).length,
+    [auditRows],
   );
-
-  const totalScans = THREAT_DATA.reduce((a, b) => a + b.value, 0);
+  const latestCriticalAt = useMemo(() => {
+    const row = auditRows.find(
+      (r) =>
+        r.eventType.includes("hard_failed") ||
+        r.eventType.includes("blocked") ||
+        r.eventType.includes("threat"),
+    );
+    return row?.createdAt ?? null;
+  }, [auditRows]);
+  const recentCriticalRows = useMemo(
+    () =>
+      auditRows
+        .filter(
+          (r) => r.eventType.includes("hard_failed") || r.eventType.includes("blocked") || r.eventType.includes("threat"),
+        )
+        .slice(0, 5),
+    [auditRows],
+  );
+  const recommendedActions = useMemo(() => {
+    const actions: string[] = [];
+    if (pendingCount > 0) actions.push(`Review ${pendingCount} pending HITL request(s) immediately.`);
+    if (riskData[0].value > 0) actions.push("Inspect high-risk events and run containment decision flow.");
+    if (liveStudentCount === 0) actions.push("Verify student endpoints are visible from heartbeat stream.");
+    if (actions.length === 0) actions.push("No immediate intervention required. Continue monitoring.");
+    return actions.slice(0, 3);
+  }, [liveStudentCount, pendingCount, riskData]);
 
   return (
     <div className="h-full overflow-y-auto" style={{ background: "#0d1320", fontFamily: GROTESK }}>
       <div className="px-6 pt-5 pb-4 border-b border-[#1a2640]" style={{ background: "#0f1828" }}>
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="flex flex-wrap items-center gap-3 lg:gap-4 min-w-0">
-            <span
-              className="tracking-widest uppercase shrink-0"
-              style={{ fontSize: "13px", fontFamily: BRAND, color: "#7eb5f5" }}
-            >
+            <span className="tracking-widest uppercase shrink-0" style={{ fontSize: "12px", fontFamily: MONO, color: "#7eb5f5" }}>
               RUNA COMMAND CENTER
             </span>
+            <select
+              value={labId}
+              onChange={(e) => setLabId(e.target.value as ComlabId)}
+              className="rounded-md border px-2 py-1 outline-none"
+              style={{
+                background: "#162035",
+                borderColor: "#2a3a55",
+                color: "#c5d5ea",
+                fontSize: "10px",
+                fontFamily: MONO,
+              }}
+              aria-label="Focus lab"
+            >
+              {COMLAB_IDS.map((id) => (
+                <option key={id} value={id}>
+                  {getComlab(id).label}
+                </option>
+              ))}
+            </select>
             <span className="text-[#4a6080] hidden sm:inline" style={{ fontSize: "10px", fontFamily: MONO }}>
               last refreshed: {lastRefreshed.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
             </span>
@@ -384,7 +537,28 @@ export function AdminCommandCenter({
             <button
               type="button"
               title="Export log"
-              onClick={() => pushToast("Export not available in demo build", "info")}
+              onClick={() => {
+                const csv = [
+                  ["id", "time", "event", "actor", "station"],
+                  ...auditRows.map((r) => [
+                    String(r.id),
+                    new Date(r.createdAt).toISOString(),
+                    r.eventType,
+                    r.actorUserId,
+                    extractStation(r.detail),
+                  ]),
+                ]
+                  .map((row) => row.map((v) => `"${String(v).replaceAll('"', '""')}"`).join(","))
+                  .join("\n");
+                const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `runa-command-audit-${Date.now()}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+                pushToast("Audit export generated.", "success");
+              }}
               className="w-9 h-9 rounded-md border border-[#2a3a55] flex items-center justify-center text-[#7eb5f5] hover:bg-[#162035] transition-colors"
             >
               <Download size={16} />
@@ -392,79 +566,70 @@ export function AdminCommandCenter({
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-[#1a2640]">
-          <span className="text-[#2a3a55] uppercase w-full sm:w-auto mb-1 sm:mb-0" style={{ fontSize: "8px", fontFamily: MONO }}>
-            Focus lab
-          </span>
-          {COMLAB_DEFINITIONS.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => setLabId(c.id)}
-              className="px-2.5 py-1 rounded border transition-colors"
-              style={{
-                fontFamily: MONO,
-                fontSize: "9px",
-                borderColor: labId === c.id ? "#3a6fff" : "#2a3a55",
-                color: labId === c.id ? "#c5d5ea" : "#4a6080",
-                background: labId === c.id ? "#162035" : "transparent",
-              }}
-            >
-              {c.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex flex-wrap gap-2 mt-3">
-          {modules.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => onNavigate(m.id)}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-md border transition-colors hover:bg-[#162035]"
-              style={{
-                borderColor: m.warn ? "#e05c6a55" : "#2a3a55",
-                background: "#111d30",
-                fontFamily: MONO,
-                fontSize: "10px",
-                color: m.warn ? "#e8a0a8" : "#c5d5ea",
-              }}
-            >
-              <m.icon size={14} className={m.warn ? "text-[#e05c6a]" : "text-[#7eb5f5]"} />
-              {m.label}
-              {m.id === "approvals" && pendingCount > 0 && (
-                <span
-                  className="min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center text-white"
-                  style={{ fontSize: "9px", background: "#e05c6a" }}
-                >
-                  {pendingCount > 9 ? "9+" : pendingCount}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
       </div>
 
       <div className="p-6">
-        <div className="grid gap-4 grid-cols-1 lg:grid-cols-3">
+        <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div
+            className={`${ADMIN_COMMAND_PANEL_CLASS} px-4 py-3`}
+            style={ADMIN_COMMAND_PANEL_STYLE}
+          >
+            <p className="text-[#4a6080] uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
+              Focus Lab
+            </p>
+            <p className="text-[#c5d5ea]" style={{ fontSize: "12px", fontFamily: MONO }}>
+              {getComlab(labId).label}
+            </p>
+          </div>
+          <div
+            className={`${ADMIN_COMMAND_PANEL_CLASS} px-4 py-3`}
+            style={ADMIN_COMMAND_PANEL_STYLE}
+          >
+            <p className="text-[#4a6080] uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
+              Audit Events (1h)
+            </p>
+            <p className="text-[#c5d5ea] tabular-nums" style={{ fontSize: "12px", fontFamily: MONO }}>
+              {auditEventsLastHour}
+            </p>
+          </div>
+          <div
+            className={`${ADMIN_COMMAND_PANEL_CLASS} px-4 py-3`}
+            style={ADMIN_COMMAND_PANEL_STYLE}
+          >
+            <p className="text-[#4a6080] uppercase" style={{ fontSize: "8px", fontFamily: MONO }}>
+              Latest Critical Event
+            </p>
+            <p className="text-[#c5d5ea] tabular-nums" style={{ fontSize: "12px", fontFamily: MONO }}>
+              {latestCriticalAt
+                ? new Date(latestCriticalAt).toLocaleTimeString("en-GB", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })
+                : "none"}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid gap-4 grid-cols-1 xl:grid-cols-12">
           {/* Row 1 — KPI strip */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 lg:col-span-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 xl:col-span-12">
             {kpiRows.map((k) => (
               <DashboardKPICard key={k.label} {...k} animKey={kpiAnimKey} />
             ))}
           </div>
 
-          {/* Row 2 left — occupancy (2 cols) */}
+          {/* Row 2 left — occupancy */}
           <div
-            className="rounded-[10px] p-5 border min-h-[240px] flex flex-col lg:col-span-2"
+            className="rounded-[10px] p-5 border min-h-[280px] flex flex-col xl:col-span-7"
             style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
           >
             <p className="text-[#c5d5ea] mb-2" style={{ fontSize: "13px" }}>
-              Lab Occupancy
+              Lab Occupancy (current window)
             </p>
             <div className="flex-1 min-h-[180px]">
-              <ResponsiveContainer width="100%" height={180}>
-                <BarChart data={OCCUPANCY_DATA} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={occupancyData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(58,111,255,0.1)" vertical={false} />
                   <XAxis dataKey="lab" tick={{ fill: "#c5d5ea", fontSize: 11 }} axisLine={false} tickLine={false} />
                   <YAxis tick={{ fill: "#c5d5ea", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -493,127 +658,83 @@ export function AdminCommandCenter({
             </div>
           </div>
 
-          {/* Row 2 right — health */}
-          <div key={healthTick} className="min-h-[240px]">
-            <SystemHealthWidget onHealthResult={onHealthResult} />
-          </div>
-
-          {/* Row 3 left — threat donut */}
+          {/* Row 2 right — risk mix + operator actions */}
           <div
-            className="rounded-[10px] p-5 border flex flex-col items-center min-h-[260px]"
+            className="rounded-[10px] p-5 border flex flex-col min-h-[280px] xl:col-span-5"
             style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
           >
-            <p className="text-[#c5d5ea] self-start mb-1" style={{ fontSize: "13px" }}>
-              Threat Summary
+            <p className="text-[#c5d5ea] mb-2" style={{ fontSize: "13px" }}>
+              Risk & Operator Actions (60m)
             </p>
-            <div className="w-full h-[160px] relative">
-              <ResponsiveContainer width="100%" height={160}>
-                <PieChart>
-                  <Pie
-                    data={THREAT_DATA}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={50}
-                    outerRadius={68}
-                    stroke="none"
-                  >
-                    {THREAT_DATA.map((entry) => (
-                      <Cell key={entry.name} fill={entry.fill} />
-                    ))}
-                    <Label
-                      content={({ viewBox }) => {
-                        const cx = (viewBox as { cx?: number }).cx ?? 0;
-                        const cy = (viewBox as { cy?: number }).cy ?? 0;
-                        return (
-                          <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle">
-                            <tspan x={cx} y={cy - 6} fill="#c5d5ea" style={{ fontSize: 18, fontFamily: MONO }}>
-                              {totalScans}
-                            </tspan>
-                            <tspan x={cx} y={cy + 12} fill="#4a6080" style={{ fontSize: 9, fontFamily: MONO }}>
-                              scans
-                            </tspan>
-                          </text>
-                        );
-                      }}
-                    />
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
+            <div className="space-y-3 mb-4">
+              {riskData.map((d) => {
+                const total = Math.max(1, riskData.reduce((sum, row) => sum + row.value, 0));
+                const width = (d.value / total) * 100;
+                return (
+                  <div key={d.name}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span style={{ color: "#c5d5ea", fontSize: "11px", fontFamily: MONO }}>{d.name}</span>
+                      <span style={{ color: d.fill, fontSize: "10px", fontFamily: MONO }}>{d.value}</span>
+                    </div>
+                    <div className="h-2 rounded-full overflow-hidden" style={{ background: "#111d30" }}>
+                      <div className="h-full rounded-full" style={{ width: `${width}%`, background: d.fill }} />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            <div className="flex flex-wrap justify-center gap-3 mt-2 w-full">
-              {THREAT_DATA.map((d) => (
-                <div key={d.name} className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full" style={{ background: d.fill }} />
-                  <span className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
-                    {d.name} {d.value}
+            <div className="rounded-md border p-3 space-y-2" style={{ borderColor: "#2a3a55", background: "#111d30" }}>
+              <p className="text-[#7eb5f5]" style={{ fontSize: "10px", fontFamily: MONO }}>
+                Recommended next actions
+              </p>
+              {recommendedActions.map((line) => (
+                <div key={line} className="flex items-start gap-2">
+                  <span className="mt-1 w-1.5 h-1.5 rounded-full bg-[#7eb5f5] shrink-0" />
+                  <span className="text-[#c5d5ea]" style={{ fontSize: "11px" }}>
+                    {line}
                   </span>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Row 3 right — live feed (2 cols) */}
-          <div className="min-h-[260px] lg:col-span-2">
-            <LiveAuditFeed />
+          {/* Row 3 — audit stream and critical incidents */}
+          <div className="min-h-[260px] xl:col-span-8">
+            <LiveAuditFeed items={liveFeedItems} />
           </div>
-        </div>
-
-        {/* Selected lab quick strip */}
-        <div
-          className="rounded-[10px] border px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-4"
-          style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
-        >
-          <div className="min-w-0">
-            <p className="text-[#4a6080] uppercase mb-0.5" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Selected lab
-            </p>
-            <p className="text-[#c5d5ea] truncate" style={{ fontSize: "13px" }}>
-              <span className="font-semibold">{lab.label}</span>
-              <span className="text-[#4a6080]"> · </span>
-              {lab.subject}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => onNavigate("lab-monitoring")}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded border border-[#3a6fff80] text-[#7eb5f5] hover:bg-[#1e2e48] transition-colors"
-            style={{ fontSize: "10px", fontFamily: MONO }}
+          <div
+            className="rounded-[10px] p-5 border min-h-[260px] xl:col-span-4"
+            style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}
           >
-            Open monitoring
-            <ChevronRight size={14} />
-          </button>
+            <p className="text-[#c5d5ea] mb-3" style={{ fontSize: "13px" }}>
+              Recent Critical Incidents
+            </p>
+            <div className="space-y-3">
+              {recentCriticalRows.length === 0 ? (
+                <p className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
+                  No high-risk incidents in the current stream.
+                </p>
+              ) : (
+                recentCriticalRows.map((row) => (
+                  <div key={row.id} className="rounded-md border p-2.5" style={{ borderColor: "#2a3a55", background: "#111d30" }}>
+                    <p className="text-[#e05c6a]" style={{ fontSize: "10px", fontFamily: MONO }}>
+                      {row.eventType.replaceAll("_", " ")}
+                    </p>
+                    <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                      {new Date(row.createdAt).toLocaleTimeString("en-GB", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}{" "}
+                      · {row.actorUserId || "system"}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="rounded-[10px] border px-4 py-3 mt-4" style={{ background: "#1a2640", borderColor: "rgba(58,111,255,0.15)" }}>
-          <div className="flex items-center justify-between gap-3 mb-2">
-            <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
-              Recent activity
-            </span>
-            <button
-              type="button"
-              onClick={() => onNavigate("audit-trails")}
-              className="text-[#7eb5f5] hover:underline shrink-0"
-              style={{ fontSize: "9px", fontFamily: MONO }}
-            >
-              Full log in Audit →
-            </button>
-          </div>
-          <ul className="space-y-2 m-0 p-0 list-none">
-            {SECURITY_PREVIEW.map((ev, i) => (
-              <li key={i} className="flex items-start gap-2">
-                <span className="text-[#2a3a55] shrink-0 tabular-nums" style={{ fontSize: "9px", fontFamily: MONO }}>
-                  {ev.time}
-                </span>
-                <span className="w-1.5 h-1.5 rounded-full mt-1 shrink-0" style={{ background: levelColors[ev.level] }} />
-                <span className="text-[#a0b0c0] min-w-0" style={{ fontSize: "10px" }}>
-                  {ev.msg}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
       </div>
     </div>
   );

@@ -1,22 +1,19 @@
-import { useState, useEffect, useCallback } from "react";
-import { useNotificationContext } from "../providers/NotificationProvider";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useElectron } from "../ipc/useElectron";
 import { useAdminLab } from "../context/AdminLabContext";
 import { COMLAB_DEFINITIONS, getComlab } from "../data/comlabs";
+import { ADMIN_FONT_MONO, ADMIN_FONT_SANS, ADMIN_HEADER_TITLE_SIZE, ADMIN_PANEL_CLASS, ADMIN_PANEL_STYLE } from "./admin/adminUiTokens";
 import {
   Download,
   Filter,
-  MoreVertical,
   CheckCircle,
   AlertTriangle,
   Shield,
-  ChevronLeft,
-  ChevronRight,
   Search,
 } from "lucide-react";
 
-const MONO = "'Space Mono', monospace";
-const GROTESK = "'Space Grotesk', sans-serif";
+const MONO = ADMIN_FONT_MONO;
+const GROTESK = ADMIN_FONT_SANS;
 
 const AUDIT_LAB_KEYS = COMLAB_DEFINITIONS.map((c) => c.auditLogKey);
 
@@ -38,127 +35,14 @@ interface StationLog {
   event: SecurityEvent;
 }
 
-const logsPerLab: Record<string, StationLog[]> = {
-  "COMLAB 8": [
-    {
-      id: "1",
-      station: "C08-PC05",
-      student: "Casio, Gen Benedict",
-      studentId: "202110299",
-      inTime: "13:00:14",
-      outTime: null,
-      date: "2026-04-21",
-      event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
-    },
-    {
-      id: "2",
-      station: "C08-PC12",
-      student: "Santos, Maria Clara",
-      studentId: "202211548",
-      inTime: "13:05:00",
-      outTime: "14:30:22",
-      date: "2026-04-22",
-      event: { type: "blocked", label: "File Blocked", color: "#e05c6a" },
-    },
-    {
-      id: "3",
-      station: "C08-PC28",
-      student: "Reyes, Jonathan P.",
-      studentId: "202116056",
-      inTime: "13:12:45",
-      outTime: null,
-      date: "2026-04-21",
-      event: { type: "monitoring", label: "Active Monitoring", color: "#4a6fa5" },
-    },
-    {
-      id: "4",
-      station: "C08-PC33",
-      student: "Dela Rosa, Karen",
-      studentId: "202318892",
-      inTime: "13:15:20",
-      outTime: null,
-      date: "2026-04-22",
-      event: { type: "identity", label: "Identity Verified", color: "#4a6fa5" },
-    },
-    {
-      id: "5",
-      station: "C08-PC07",
-      student: "Abad, Marco Luis",
-      studentId: "202209871",
-      inTime: "12:58:44",
-      outTime: "14:02:11",
-      date: "2026-04-21",
-      event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
-    },
-    {
-      id: "6",
-      station: "C08-PC19",
-      student: "Mercado, Alex",
-      studentId: "202315540",
-      inTime: "13:21:08",
-      outTime: null,
-      date: "2026-04-22",
-      event: { type: "monitoring", label: "Active Monitoring", color: "#4a6fa5" },
-    },
-  ],
-  "COMLAB 9": [
-    {
-      id: "7",
-      station: "C09-PC02",
-      student: "Garcia, Sofia N.",
-      studentId: "202210034",
-      inTime: "10:02:19",
-      outTime: null,
-      date: "2026-04-21",
-      event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
-    },
-    {
-      id: "8",
-      station: "C09-PC14",
-      student: "Torres, Jericho M.",
-      studentId: "202117782",
-      inTime: "10:05:55",
-      outTime: null,
-      date: "2026-04-22",
-      event: { type: "identity", label: "Identity Verified", color: "#4a6fa5" },
-    },
-  ],
-  "COMLAB 10": [
-    {
-      id: "9",
-      station: "C10-PC01",
-      student: "Navarro, Czarina B.",
-      studentId: "202318001",
-      inTime: "08:01:44",
-      outTime: "10:55:30",
-      date: "2026-04-21",
-      event: { type: "scan", label: "System Scan Complete", color: "#4ac77e" },
-    },
-  ],
-  "COMLAB 11": [
-    {
-      id: "10",
-      station: "C11-PC03",
-      student: "Lim, Danielle",
-      studentId: "202215678",
-      inTime: "13:00:00",
-      outTime: null,
-      date: "2026-04-22",
-      event: { type: "blocked", label: "File Blocked", color: "#e05c6a" },
-    },
-  ],
-};
-
-const capacities: Record<string, { current: number; total: number }> = Object.fromEntries(
-  COMLAB_DEFINITIONS.map((c) => [
-    c.auditLogKey,
-    { current: Math.round((c.utilizationPercent / 100) * 40), total: 40 },
-  ]),
-);
-
-const sessions: Record<string, { subject: string; prof: string }> = Object.fromEntries(
-  COMLAB_DEFINITIONS.map((c) => [c.auditLogKey, { subject: c.subject, prof: c.professorName }]),
-);
+function mapEventType(eventType: string): SecurityEvent {
+  if (eventType.includes("blocked") || eventType.includes("hard_failed")) {
+    return { type: "blocked", label: "Policy Blocked", color: "#e05c6a" };
+  }
+  if (eventType.includes("scan")) return { type: "scan", label: "System Scan", color: "#4ac77e" };
+  if (eventType.includes("presence")) return { type: "identity", label: "Presence Heartbeat", color: "#4a6fa5" };
+  return { type: "monitoring", label: "Monitoring Event", color: "#4a6fa5" };
+}
 
 function EventBadge({ event }: { event: SecurityEvent }) {
   const icons: Record<string, React.ReactNode> = {
@@ -192,16 +76,18 @@ interface RunaAuditRow {
   id: number;
   createdAt: number;
   eventType: string;
+  detail: string;
   actorUserId: string;
   actorRole?: string;
   riskTier?: string;
   approvalId?: string;
+  approverUserId?: string;
+  confidenceScore?: number;
 }
 
 const PAGE_SIZE = 10;
 
 export function AuditTrailsPanel() {
-  const { pushToast } = useNotificationContext();
   const electron = useElectron();
   const { labId, setLabId } = useAdminLab();
   const [surface, setSurface] = useState<AuditSurface>("hardware");
@@ -212,7 +98,6 @@ export function AuditTrailsPanel() {
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom, setDateFrom] = useState("2026-04-21");
   const [dateTo, setDateTo] = useState("2026-04-21");
-  const [lockedStations, setLockedStations] = useState<Set<string>>(() => new Set());
 
   const refreshRuna = useCallback(async () => {
     try {
@@ -229,10 +114,38 @@ export function AuditTrailsPanel() {
   }, [surface, refreshRuna]);
 
   useEffect(() => {
+    if (surface !== "hardware") return;
+    void refreshRuna();
+  }, [surface, refreshRuna]);
+
+  useEffect(() => {
     setActiveTab(getComlab(labId).auditLogKey);
   }, [labId]);
 
-  const logs = logsPerLab[activeTab] ?? [];
+  const logs = useMemo(() => {
+    const mapped: StationLog[] = runaRows
+      .filter((row) => row.actorRole === "student" || row.eventType === "presence_heartbeat")
+      .map((row) => {
+        const dt = new Date(row.createdAt);
+        const hhmmss = dt.toLocaleTimeString("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+        const date = dt.toISOString().slice(0, 10);
+        return {
+          id: String(row.id),
+          station: row.approvalId ? `APP-${row.approvalId.slice(0, 6)}` : `PC-${String((row.id % 30) + 1).padStart(2, "0")}`,
+          student: row.actorUserId,
+          studentId: row.actorUserId,
+          inTime: hhmmss,
+          outTime: null,
+          date,
+          event: mapEventType(row.eventType),
+        };
+      });
+    return mapped;
+  }, [runaRows]);
   const filtered = logs.filter((l) => {
     const matchesSearch =
       l.student.toLowerCase().includes(search.toLowerCase()) ||
@@ -252,9 +165,6 @@ export function AuditTrailsPanel() {
   });
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-  const cap = capacities[activeTab];
-  const sess = sessions[activeTab];
-  const securityFlags = logs.filter((l) => l.event.type === "blocked").length;
 
   return (
     <div className="h-full overflow-y-auto" style={{ background: "#0d1320", fontFamily: GROTESK }}>
@@ -293,7 +203,7 @@ export function AuditTrailsPanel() {
         <div className="p-6 space-y-4">
           <div className="flex items-center justify-between gap-4">
             <p className="text-[#c5d5ea]" style={{ fontSize: "13px", fontFamily: GROTESK }}>
-              Events persisted in electron-store (login, scans, chat, HITL decisions).
+              Events are minimized for governance: actor, risk, decision trace, and linked approval evidence.
             </p>
             <button
               type="button"
@@ -304,13 +214,13 @@ export function AuditTrailsPanel() {
               Refresh
             </button>
           </div>
-          <div className="rounded-xl border overflow-hidden" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+          <div className={`${ADMIN_PANEL_CLASS} overflow-hidden`} style={ADMIN_PANEL_STYLE}>
             <div
               className="grid px-4 py-2 border-b border-[#1a2640] text-[#4a6080] uppercase tracking-widest"
               style={{
                 fontSize: "8px",
                 fontFamily: MONO,
-                gridTemplateColumns: "56px 130px minmax(0,1fr) 88px 56px minmax(0,0.8fr)",
+                gridTemplateColumns: "56px 118px minmax(0,1fr) 84px 56px 88px 58px",
               }}
             >
               <span>ID</span>
@@ -319,6 +229,7 @@ export function AuditTrailsPanel() {
               <span>Actor</span>
               <span>Risk</span>
               <span>Approval</span>
+              <span>Conf</span>
             </div>
             {runaRows.length === 0 ? (
               <p className="py-8 text-center text-[#4a6080]" style={{ fontSize: "11px", fontFamily: MONO }}>
@@ -330,7 +241,7 @@ export function AuditTrailsPanel() {
                   key={row.id}
                   className="grid px-4 py-2 border-b border-[#1a2640] items-start gap-x-1"
                   style={{
-                    gridTemplateColumns: "56px 130px minmax(0,1fr) 88px 56px minmax(0,0.8fr)",
+                    gridTemplateColumns: "56px 118px minmax(0,1fr) 84px 56px 88px 58px",
                     fontSize: "10px",
                     fontFamily: MONO,
                   }}
@@ -345,10 +256,14 @@ export function AuditTrailsPanel() {
                       second: "2-digit",
                     })}
                   </span>
-                  <span className="text-[#c5d5ea] break-all">{row.eventType}</span>
+                  <span className="text-[#c5d5ea] break-all" title={row.detail}>
+                    {row.eventType}
+                    {row.approverUserId ? ` · by ${row.approverUserId}` : ""}
+                  </span>
                   <span className="text-[#4a6080] truncate" title={row.actorUserId}>{row.actorUserId}</span>
                   <span className="text-[#a06820]">{row.riskTier ?? "—"}</span>
                   <span className="text-[#2a3a55] truncate" title={row.approvalId ?? ""}>{row.approvalId ?? "—"}</span>
+                  <span className="text-[#2a3a55]">{typeof row.confidenceScore === "number" ? row.confidenceScore.toFixed(2) : "—"}</span>
                 </div>
               ))
             )}
@@ -363,14 +278,9 @@ export function AuditTrailsPanel() {
             <p className="text-[#4a6080] tracking-widest uppercase mb-2" style={{ fontSize: "8px", fontFamily: MONO }}>
               Institutional Resource Monitor
             </p>
-            <h1 className="text-[#c5d5ea]" style={{ fontSize: "26px", lineHeight: 1.15 }}>
+            <h1 className="text-[#c5d5ea]" style={{ fontSize: ADMIN_HEADER_TITLE_SIZE, lineHeight: 1.15 }}>
               Laboratory Attendance &amp;<br />Security Log
             </h1>
-          </div>
-          <div className="text-right mt-2">
-            <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>System Status</p>
-            <p style={{ color: "#e8821a", fontSize: "14px", fontFamily: MONO }}>SECURE /</p>
-            <p style={{ color: "#4ac77e", fontSize: "14px", fontFamily: MONO }}>OPERATIONAL</p>
           </div>
         </div>
 
@@ -389,7 +299,8 @@ export function AuditTrailsPanel() {
               className="transition-all pb-1"
               style={{
                 color: activeTab === lab ? "#c5d5ea" : "#4a6080",
-                fontSize: "13px",
+                fontSize: "12px",
+                fontFamily: MONO,
                 borderBottom: activeTab === lab ? "2px solid #3a6fff" : "2px solid transparent",
               }}
             >
@@ -464,66 +375,9 @@ export function AuditTrailsPanel() {
         </div>
       )}
 
-      <div className="p-6 grid gap-5" style={{ gridTemplateColumns: "220px 1fr" }}>
-        {/* Left stats column */}
-        <div className="space-y-4">
-          {/* Current Capacity */}
-          <div
-            className="rounded-xl p-5 border"
-            style={{ background: "#111d30", borderColor: "#1e2e48" }}
-          >
-            <p className="text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Current Capacity
-            </p>
-            <div className="flex items-end gap-2 mb-3">
-              <span className="text-[#c5d5ea]" style={{ fontSize: "42px", fontFamily: MONO, lineHeight: 1 }}>{cap.current}</span>
-              <span className="text-[#4a6080] mb-1" style={{ fontSize: "16px", fontFamily: MONO }}>/ {cap.total} UNITS</span>
-            </div>
-            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#1a2640" }}>
-              <div
-                className="h-full rounded-full"
-                style={{ width: `${(cap.current / cap.total) * 100}%`, background: "#3a6fff" }}
-              />
-            </div>
-          </div>
-
-          {/* Security Flags */}
-          <div
-            className="rounded-xl p-5 border"
-            style={{ background: "#111d30", borderColor: "#1e2e48" }}
-          >
-            <p className="text-[#4a6080] tracking-widest uppercase mb-3" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Security Flags
-            </p>
-            <div className="flex items-end gap-3">
-              <span style={{ color: "#e8821a", fontSize: "42px", fontFamily: MONO, lineHeight: 1 }}>
-                {String(securityFlags).padStart(2, "0")}
-              </span>
-              <span style={{ color: "#4ac77e", fontSize: "11px", fontFamily: MONO, marginBottom: "4px" }}>RESOLVED</span>
-            </div>
-          </div>
-
-          {/* Active Session */}
-          <div
-            className="rounded-xl p-5 border"
-            style={{ background: "#111d30", borderColor: "#1e2e48" }}
-          >
-            <p className="text-[#4a6080] tracking-widest uppercase mb-4" style={{ fontSize: "8px", fontFamily: MONO }}>
-              Active Session
-            </p>
-            <p className="text-[#4a6080] uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>Subject</p>
-            <p className="text-[#c5d5ea] mb-4" style={{ fontSize: "13px" }}>{sess.subject}</p>
-            <p className="text-[#4a6080] uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>Professor</p>
-            <p className="text-[#7eb5f5]" style={{ fontSize: "13px" }}>{sess.prof}</p>
-          </div>
-        </div>
-
-        {/* Right: Logs table */}
+      <div className="p-6">
         <div>
-          <div
-            className="rounded-xl border overflow-x-auto overflow-y-hidden"
-            style={{ background: "#111d30", borderColor: "#1e2e48" }}
-          >
+          <div className={`${ADMIN_PANEL_CLASS} overflow-x-auto overflow-y-hidden`} style={ADMIN_PANEL_STYLE}>
             {/* Table header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-[#1a2640]">
               <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>
@@ -579,12 +433,12 @@ export function AuditTrailsPanel() {
             <div
               className="grid px-5 py-2"
               style={{
-                gridTemplateColumns: "110px 1fr 100px 130px 90px",
+                gridTemplateColumns: "110px 1fr 130px 130px",
                 background: "#0d1320",
                 borderBottom: "1px solid #1a2640",
               }}
             >
-              {["STATION ID", "STUDENT ACCOUNTABILITY", "TEMPORAL LOG", "SECURITY EVENT", "ACTION"].map((col) => (
+              {["STATION", "STUDENT", "TIME", "EVENT"].map((col) => (
                 <span key={col} className="text-[#4a6080] tracking-widest" style={{ fontSize: "8px", fontFamily: MONO }}>
                   {col}
                 </span>
@@ -600,10 +454,8 @@ export function AuditTrailsPanel() {
               paged.map((log) => (
                 <div
                   key={log.id}
-                  className={`grid items-center px-5 py-4 border-b border-[#1a2640] hover:bg-[#162035] transition-colors group ${
-                    lockedStations.has(log.station) ? "opacity-50" : ""
-                  }`}
-                  style={{ gridTemplateColumns: "110px 1fr 100px 130px 90px" }}
+                  className="grid items-center px-5 py-4 border-b border-[#1a2640] hover:bg-[#162035] transition-colors"
+                  style={{ gridTemplateColumns: "110px 1fr 130px 130px" }}
                 >
                   {/* Station */}
                   <span style={{ color: "#7eb5f5", fontSize: "11px", fontFamily: MONO }}>{log.station}</span>
@@ -614,49 +466,13 @@ export function AuditTrailsPanel() {
                     <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>{log.studentId}</p>
                   </div>
 
-                  {/* Temporal Log */}
+                  {/* Time */}
                   <div>
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-1 h-1 rounded-full bg-[#4ac77e]" />
-                      <span style={{ color: "#4a6080", fontSize: "9px", fontFamily: MONO }}>IN:</span>
-                      <span style={{ color: "#c5d5ea", fontSize: "9px", fontFamily: MONO }}>{log.inTime}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-1">
-                      <div className="w-1 h-1 rounded-full" style={{ background: log.outTime ? "#e05c6a" : "#2a3a55" }} />
-                      <span style={{ color: "#4a6080", fontSize: "9px", fontFamily: MONO }}>OUT:</span>
-                      <span style={{ color: log.outTime ? "#c5d5ea" : "#2a3a55", fontSize: "9px", fontFamily: MONO }}>
-                        {log.outTime ?? "— : — : —"}
-                      </span>
-                    </div>
+                    <span style={{ color: "#c5d5ea", fontSize: "9px", fontFamily: MONO }}>{log.inTime}</span>
                   </div>
 
-                  {/* Security Event */}
+                  {/* Event */}
                   <EventBadge event={log.event} />
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="px-2 py-1 rounded text-[#e05c6a] border border-[#e05c6a30] hover:bg-[#e05c6a20] transition-colors"
-                      style={{ fontSize: "8px", fontFamily: MONO }}
-                      onClick={() => {
-                        let locking = false;
-                        setLockedStations((prev) => {
-                          const next = new Set(prev);
-                          locking = !next.has(log.station);
-                          if (next.has(log.station)) next.delete(log.station);
-                          else next.add(log.station);
-                          return next;
-                        });
-                        if (locking) pushToast(`Station ${log.station} locked`, "warn");
-                      }}
-                    >
-                      LOCK
-                    </button>
-                    <button type="button" className="text-[#4a6080] hover:text-[#c5d5ea] transition-colors ml-1">
-                      <MoreVertical size={13} />
-                    </button>
-                  </div>
                 </div>
               ))
             )}
@@ -708,18 +524,6 @@ export function AuditTrailsPanel() {
         </div>
       </div>
 
-      {/* Bottom ticker */}
-      <div
-        className="flex items-center gap-2 px-6 py-2 border-t border-[#1a2640]"
-        style={{ background: "#0a1020" }}
-      >
-        <div className="w-2 h-2 rounded-full bg-[#4ac77e]" />
-        <span style={{ color: "#4a6080", fontSize: "9px", fontFamily: MONO }}>
-          SESSION ENGINE: UPDATED {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })} &nbsp;|&nbsp;
-          ALL SECURITY PROTOCOLS NOMINAL &nbsp;|&nbsp;
-          COMLAB 8-11 CONNECTED
-        </span>
-      </div>
       </>
       )}
     </div>

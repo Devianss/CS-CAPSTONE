@@ -1,20 +1,14 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { AlertTriangle, Users, Activity, RefreshCw, X, Usb, Shield, ChevronRight } from "lucide-react";
+import { AlertTriangle, Users, Activity, X, Usb, Shield, ChevronRight } from "lucide-react";
 import { useNotificationContext } from "../providers/NotificationProvider";
 import { useElectron } from "../ipc/useElectron";
 import { useAdminLab } from "../context/AdminLabContext";
 import { logAudit, proposeAction } from "../agentic/approvalQueue";
-import {
-  ATTENDANCE_BY_LAB,
-  COMLAB_DEFINITIONS,
-  COMLAB_IDS,
-  buildMonitoringPcs,
-  getComlab,
-  type ComlabId,
-} from "../data/comlabs";
+import { COMLAB_DEFINITIONS, COMLAB_IDS, buildMonitoringPcs, getComlab, type ComlabId } from "../data/comlabs";
+import { ADMIN_FONT_MONO, ADMIN_FONT_SANS, ADMIN_PANEL_CLASS, ADMIN_PANEL_STYLE } from "./admin/adminUiTokens";
 
-const MONO = "'Space Mono', monospace";
-const GROTESK = "'Space Grotesk', sans-serif";
+const MONO = ADMIN_FONT_MONO;
+const GROTESK = ADMIN_FONT_SANS;
 
 type PCStatus = "active" | "idle" | "alert" | "offline";
 
@@ -34,6 +28,18 @@ type UsbDevice = {
 
 type MonitoringPc = { id: string; status: PCStatus };
 type TimelineStatus = "pending" | "active" | "done";
+interface PresenceAuditRow {
+  id: number;
+  createdAt: number;
+  eventType: string;
+  actorUserId: string;
+  actorRole?: string;
+  detail?: string;
+}
+interface LiveStudentPresence {
+  userId: string;
+  lastSeenAt: number;
+}
 
 interface UsbTimelineState {
   visible: boolean;
@@ -52,9 +58,6 @@ const STATIC_PCS_BY_LAB: Record<ComlabId, MonitoringPc[]> = Object.fromEntries(
   COMLAB_IDS.map((id) => [id, buildMonitoringPcs(getComlab(id))]),
 ) as Record<ComlabId, MonitoringPc[]>;
 
-/** 0-based row indices toggled on manual refresh (deterministic demo). */
-const REFRESH_TOGGLE_INDICES = [4, 11, 22];
-
 export function LabMonitoringPanel() {
   const { pushToast } = useNotificationContext();
   const api = useElectron();
@@ -68,17 +71,27 @@ export function LabMonitoringPanel() {
   const labDef = getComlab(activeTab);
   const [pcsBase, setPcsBase] = useState<MonitoringPc[]>(() => [...STATIC_PCS_BY_LAB[labId]]);
   const [idleOverrideIds, setIdleOverrideIds] = useState<Set<string>>(() => new Set());
+  const [liveStudentIds, setLiveStudentIds] = useState<string[]>([]);
+  const [liveStudentPresence, setLiveStudentPresence] = useState<LiveStudentPresence[]>([]);
+  const [presenceUpdatedAt, setPresenceUpdatedAt] = useState<number | null>(null);
+  const [recentWarning, setRecentWarning] = useState<string | null>(null);
 
   useEffect(() => {
     setPcsBase([...STATIC_PCS_BY_LAB[activeTab]]);
     setIdleOverrideIds(new Set());
   }, [activeTab]);
 
-  const pcs = useMemo(
-    () => pcsBase.map((p) => (idleOverrideIds.has(p.id) ? { ...p, status: "idle" as const } : p)),
-    [pcsBase, idleOverrideIds],
-  );
-  const [sessionSecs, setSessionSecs] = useState(96 * 60);
+  const pcs = useMemo(() => {
+    const overridden = pcsBase.map((p) => (idleOverrideIds.has(p.id) ? { ...p, status: "idle" as const } : p));
+    const activeSlots = liveStudentIds.length;
+    if (activeSlots <= 0) {
+      return overridden.map((p) => ({ ...p, status: "offline" as const }));
+    }
+    return overridden.map((p, i) => ({
+      ...p,
+      status: i < activeSlots ? ("active" as const) : ("offline" as const),
+    }));
+  }, [pcsBase, idleOverrideIds, liveStudentIds]);
   const [showAlert, setShowAlert] = useState(true);
   const [expandedPC, setExpandedPC] = useState<string | null>(null);
 
@@ -88,10 +101,12 @@ export function LabMonitoringPanel() {
   }, [pcs]);
   const [usbDevices, setUsbDevices] = useState<UsbDevice[]>([]);
   const [usbError, setUsbError] = useState<string | null>(null);
+  const [usbBackendReady, setUsbBackendReady] = useState(false);
   const [actorId, setActorId] = useState("admin");
   const [urlInput, setUrlInput] = useState("");
   const [blockedDomains, setBlockedDomains] = useState<string[]>([]);
   const [urlCheckBusy, setUrlCheckBusy] = useState(false);
+  const [containBusy, setContainBusy] = useState(false);
   const [usbTimeline, setUsbTimeline] = useState<UsbTimelineState>({
     visible: false,
     deviceLabel: "",
@@ -114,6 +129,69 @@ export function LabMonitoringPanel() {
     });
     void refreshBlockedDomains();
   }, [api, refreshBlockedDomains]);
+
+  useEffect(() => {
+    let alive = true;
+    const PRESENCE_WINDOW_MS = 90_000;
+    const syncPresence = async () => {
+      try {
+        const rows = (await api.audit.list(250)) as PresenceAuditRow[];
+        if (!alive) return;
+        const cutoff = Date.now() - PRESENCE_WINDOW_MS;
+        const activeStudents = new Set(
+          rows
+            .filter(
+              (r) =>
+                r.eventType === "presence_heartbeat" &&
+                r.actorRole === "student" &&
+                typeof r.createdAt === "number" &&
+                r.createdAt >= cutoff,
+            )
+            .map((r) => r.actorUserId)
+            .filter(Boolean),
+        );
+        setLiveStudentIds(Array.from(activeStudents));
+        const latestByUser = new Map<string, number>();
+        rows
+          .filter((r) => r.eventType === "presence_heartbeat" && r.actorRole === "student")
+          .forEach((r) => {
+            const prev = latestByUser.get(r.actorUserId) ?? 0;
+            if (r.createdAt > prev) latestByUser.set(r.actorUserId, r.createdAt);
+          });
+        setLiveStudentPresence(
+          Array.from(latestByUser.entries()).map(([userId, lastSeenAt]) => ({ userId, lastSeenAt })),
+        );
+        const latestWarn = rows.find(
+          (r) =>
+            (r.eventType.includes("hard_failed") ||
+              r.eventType.includes("blocked") ||
+              r.eventType.includes("threat")) &&
+            (() => {
+              if (!r.detail) return false;
+              try {
+                const parsed = JSON.parse(r.detail) as Record<string, unknown>;
+                return parsed.labId === activeTab || parsed.lab === activeTab || parsed.comlab === activeTab;
+              } catch {
+                return false;
+              }
+            })(),
+        );
+        setRecentWarning(latestWarn ? latestWarn.eventType.replaceAll("_", " ") : null);
+        setPresenceUpdatedAt(Date.now());
+      } catch {
+        if (!alive) return;
+        setLiveStudentIds([]);
+        setLiveStudentPresence([]);
+        setRecentWarning(null);
+      }
+    };
+    void syncPresence();
+    const t = setInterval(() => void syncPresence(), 15_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [activeTab, api]);
 
   const orchestrateUsbInsertion = useCallback(
     async (device: UsbDevice) => {
@@ -179,7 +257,7 @@ export function LabMonitoringPanel() {
           action: "done",
           reasoningAt: scanAt,
           actionAt,
-          actionNote: proposal.result.message,
+          actionNote: `${proposal.result.message} (status: ${proposal.result.ok ? "executed" : "hard_failed"})`,
         }));
       } else {
         setUsbTimeline((prev) => ({
@@ -188,17 +266,12 @@ export function LabMonitoringPanel() {
           action: "done",
           reasoningAt: scanAt,
           actionAt,
-          actionNote: `HIGH risk queued for HITL approval: ${proposal.request.id.slice(0, 8)}…`,
+          actionNote: `${proposal.tier.toUpperCase()} risk queued for HITL approval: ${proposal.request.id.slice(0, 8)}…`,
         }));
       }
     },
     [actorId, api, pushToast],
   );
-
-  useEffect(() => {
-    const t = setInterval(() => setSessionSecs((s) => (s > 0 ? s - 1 : 0)), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -214,6 +287,7 @@ export function LabMonitoringPanel() {
         const nextDevices = Array.isArray(body.devices) ? body.devices : [];
         setUsbDevices(nextDevices);
         setUsbError(null);
+        setUsbBackendReady(true);
         const signatures = nextDevices.map((d) => `${d.vendor_id ?? "?"}:${d.product_id ?? "?"}:${d.product ?? "?"}`);
         if (!usbBaselineReadyRef.current) {
           seenUsbSignaturesRef.current = new Set(signatures);
@@ -232,6 +306,7 @@ export function LabMonitoringPanel() {
       } else {
         setUsbDevices([]);
         setUsbError(r.error ?? "unreachable");
+        setUsbBackendReady(false);
       }
     };
     void pollUsb();
@@ -292,7 +367,7 @@ export function LabMonitoringPanel() {
         if (proposal.autoExecuted) {
           pushToast(`Blocklist enforced for ${domain}`, "warn");
         } else {
-          pushToast(`Suspicious URL queued for approval: ${proposal.request.id.slice(0, 8)}…`, "warn");
+          pushToast(`Suspicious URL queued for HITL approval: ${proposal.request.id.slice(0, 8)}…`, "warn");
         }
       } else {
         pushToast("URL is currently allowed by analyzer/policy", "success");
@@ -303,16 +378,41 @@ export function LabMonitoringPanel() {
     }
   }, [actorId, api, pushToast, refreshBlockedDomains, urlInput]);
 
-  const mm = Math.floor(sessionSecs / 60);
-  const ss = sessionSecs % 60;
-  const sessionStr = `${String(Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
+  const sessionStr = useMemo(() => {
+    const range = labDef.timeRange;
+    const m = range.match(/(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/);
+    if (!m) return "--:--";
+    const [, sh, sm, eh, em] = m;
+    const now = new Date();
+    const start = new Date(now);
+    start.setHours(Number(sh), Number(sm), 0, 0);
+    const end = new Date(now);
+    end.setHours(Number(eh), Number(em), 0, 0);
+    const diff = Math.max(0, Math.floor((end.getTime() - now.getTime()) / 1000));
+    if (now < start || now > end) return "--:--";
+    const mins = Math.floor(diff / 60);
+    return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+  }, [labDef.timeRange]);
 
   const prof = {
     name: labDef.professorName,
     subject: labDef.subject,
     timeRange: labDef.timeRange,
   };
-  const attendance = ATTENDANCE_BY_LAB[activeTab];
+  const attendance = useMemo(
+    () =>
+      liveStudentPresence
+        .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+        .map((row, i) => ({
+          name: row.userId,
+          id: row.userId,
+          pc: `PC-${String(i + 1).padStart(2, "0")}`,
+          ip: "live-client",
+          status: "ONLINE",
+          color: "#4ac77e",
+        })),
+    [liveStudentPresence],
+  );
   const activeCount = pcs.filter((p) => p.status === "active").length;
 
   return (
@@ -330,23 +430,6 @@ export function LabMonitoringPanel() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            className="w-7 h-7 flex items-center justify-center text-[#4a6080] hover:text-[#7eb5f5]"
-            onClick={() => {
-              setPcsBase((prev) =>
-                prev.map((pc, i) => {
-                  if (!REFRESH_TOGGLE_INDICES.includes(i)) return pc;
-                  if (pc.status !== "active" && pc.status !== "idle") return pc;
-                  return { ...pc, status: pc.status === "active" ? "idle" : "active" };
-                }),
-              );
-              pushToast("Lab monitoring data refreshed", "info");
-            }}
-            title="Refresh lab data"
-          >
-            <RefreshCw size={13} />
-          </button>
           <span className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
             {new Date().toLocaleTimeString("en-GB")} UTC
           </span>
@@ -370,19 +453,6 @@ export function LabMonitoringPanel() {
             }}
           >
             <span style={{ fontSize: "12px", fontFamily: MONO }}>{lab.label}</span>
-            {lab.incidentCount > 0 && (
-              <span
-                className="px-1.5 py-0.5 rounded"
-                style={{ background: "#e05c6a20", color: "#e05c6a", fontSize: "8px", fontFamily: MONO }}
-              >
-                {lab.incidentCount} INCIDENT
-              </span>
-            )}
-            {lab.incidentCount === 0 && (
-              <span style={{ color: "#4ac77e", fontSize: "8px", fontFamily: MONO }}>
-                {lab.healthLabel}
-              </span>
-            )}
           </button>
         ))}
       </div>
@@ -403,7 +473,7 @@ export function LabMonitoringPanel() {
             </p>
           </div>
           <div className="text-center">
-            <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>Session Time Left</p>
+            <p className="text-[#4a6080] tracking-widest uppercase mb-1" style={{ fontSize: "8px", fontFamily: MONO }}>Session Time Left (Scheduled)</p>
             <p className="text-[#c5d5ea] tabular-nums" style={{ fontSize: "36px", fontFamily: MONO, lineHeight: 1 }}>
               {sessionStr}
             </p>
@@ -420,29 +490,49 @@ export function LabMonitoringPanel() {
             <span
               className="px-4 py-1.5 rounded"
               style={{
-                background: labDef.incidentCount > 0 ? "#e05c6a20" : "#4ac77e20",
-                color: labDef.incidentCount > 0 ? "#e05c6a" : "#4ac77e",
+                background: recentWarning ? "#e05c6a20" : "#4ac77e20",
+                color: recentWarning ? "#e05c6a" : "#4ac77e",
                 fontSize: "13px",
                 fontFamily: MONO,
-                border: `1px solid ${labDef.incidentCount > 0 ? "#e05c6a40" : "#4ac77e40"}`,
+                border: `1px solid ${recentWarning ? "#e05c6a40" : "#4ac77e40"}`,
               }}
             >
-              {labDef.healthLabel}
+              {recentWarning ? "ELEVATED" : "HEALTHY"}
             </span>
           </div>
         </div>
 
-        <div
-          className="rounded-xl border px-4 py-3 flex flex-wrap items-start gap-3"
-          style={{ background: "#111d30", borderColor: "#1e2e48" }}
-        >
+        <div className={`${ADMIN_PANEL_CLASS} px-4 py-3 flex flex-wrap items-start gap-3`} style={ADMIN_PANEL_STYLE}>
+          <div className="w-full flex items-center justify-between border-b border-[#1e2e48] pb-2 mb-1">
+            <span className="text-[#c5d5ea]" style={{ fontSize: "11px", fontFamily: MONO }}>
+              Active student sessions (current lab): {liveStudentIds.length}
+            </span>
+            <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+              {presenceUpdatedAt
+                ? `audit refreshed ${new Date(presenceUpdatedAt).toLocaleTimeString("en-GB", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })}`
+                : "audit refresh pending"}
+            </span>
+          </div>
           <div className="flex items-center gap-2 shrink-0">
             <Usb size={14} className="text-[#7eb5f5]" />
             <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
-              USB bus (sidecar)
+              USB monitor (security service)
             </span>
             <span className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
               refresh 5s
+            </span>
+            <span
+              style={{
+                color: usbBackendReady ? "#4ac77e" : "#e8821a",
+                fontSize: "9px",
+                fontFamily: MONO,
+              }}
+            >
+              {usbBackendReady ? "backend ready" : "backend unavailable"}
             </span>
           </div>
           {usbError ? (
@@ -451,7 +541,7 @@ export function LabMonitoringPanel() {
             </p>
           ) : usbDevices.length === 0 ? (
             <p className="text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
-              No devices reported (pyusb optional).
+              No USB devices reported by security service.
             </p>
           ) : (
             <ul className="flex flex-wrap gap-2 m-0 p-0 list-none flex-1 min-w-0">
@@ -471,7 +561,7 @@ export function LabMonitoringPanel() {
           )}
         </div>
 
-        <div className="rounded-xl border p-4" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
+        <div className={`${ADMIN_PANEL_CLASS} p-4`} style={ADMIN_PANEL_STYLE}>
           <div className="flex items-center gap-2 mb-2">
             <Shield size={14} className="text-[#e8821a]" />
             <span className="text-[#c5d5ea]" style={{ fontSize: "12px" }}>
@@ -479,7 +569,7 @@ export function LabMonitoringPanel() {
             </span>
           </div>
           <p className="text-[#4a6080] mb-3" style={{ fontSize: "10px", fontFamily: MONO }}>
-            Checks local enforced blocklist first, then analyzer. Suspicious URLs queue `enforce_blocklist` via HITL.
+            Checks shared enforced blocklist first, then analyzer. Suspicious URLs queue `enforce_blocklist` via HITL.
           </p>
           <div className="flex gap-2 mb-3">
             <input
@@ -573,24 +663,10 @@ export function LabMonitoringPanel() {
         )}
 
         <div className="grid grid-cols-3 gap-5">
-          {/* Terminal Matrix */}
+          {/* Workstation Layout */}
           <div className="col-span-2 rounded-xl p-5 border" style={{ background: "#111d30", borderColor: "#1e2e48" }}>
             <div className="flex items-center justify-between mb-4">
-              <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>Terminal Status Matrix</span>
-              <div className="flex items-center gap-3">
-                {(["active", "alert", "idle", "offline"] as PCStatus[]).map((s) => (
-                  <div key={s} className="flex items-center gap-1">
-                    <div
-                      className="w-2 h-2 rounded-sm"
-                      style={{ background: PC_STATUS_STYLE[s].bg, border: `1px solid ${PC_STATUS_STYLE[s].border}` }}
-                    />
-                    <span className="text-[#4a6080] capitalize" style={{ fontSize: "8px", fontFamily: MONO }}>{s}</span>
-                  </div>
-                ))}
-                <span className="text-[#2a3a55]" style={{ fontSize: "8px", fontFamily: MONO }}>
-                  Last Update: {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              </div>
+              <span className="text-[#c5d5ea]" style={{ fontSize: "13px" }}>Lab Workstation Layout</span>
             </div>
             <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(6, 1fr)" }}>
               {pcs.map((pc) => {
@@ -616,9 +692,9 @@ export function LabMonitoringPanel() {
                       {pc.status === "active" && <circle cx="12" cy="7" r="3" fill={style.border} opacity="0.6" />}
                       {pc.status === "alert" && <path d="M12 4 L14.5 9 H9.5 Z" fill={style.border} opacity="0.9" />}
                     </svg>
-                    <span style={{ color: style.text, fontSize: "7px", fontFamily: MONO }}>{pc.id}</span>
+                    <span style={{ color: style.text, fontSize: "8px", fontFamily: MONO }}>{pc.id}</span>
                     {pc.status !== "idle" && pc.status !== "offline" && (
-                      <span style={{ color: style.text, fontSize: "6px", fontFamily: MONO, textTransform: "uppercase" }}>
+                      <span style={{ color: style.text, fontSize: "8px", fontFamily: MONO, textTransform: "uppercase" }}>
                         {pc.status}
                       </span>
                     )}
@@ -637,8 +713,8 @@ export function LabMonitoringPanel() {
                       HIGH ALERT: {expandedPC}
                     </p>
                     <p className="text-[#a07080] mt-1.5" style={{ fontSize: "10px" }}>
-                      Security engine detected unknown process "kill_linux_skills.exe" attempting to load a virtual drive.
-                      Process has been quarantined by Runa security engine.
+                      Live warning source from shared audit stream: {recentWarning ?? "security warning"}.
+                      This panel reflects governed app-context response, not host-level forensic certainty.
                     </p>
                     <div className="flex items-center gap-3 mt-3">
                       <div>
@@ -647,11 +723,13 @@ export function LabMonitoringPanel() {
                       </div>
                       <div>
                         <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>DETECTION TIME</p>
-                        <p className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>14:26:08</p>
+                        <p className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>
+                          {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                        </p>
                       </div>
                       <div>
                         <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>STATUS</p>
-                        <p className="text-[#e8821a]" style={{ fontSize: "10px", fontFamily: MONO }}>QUARANTINED</p>
+                        <p className="text-[#e8821a]" style={{ fontSize: "10px", fontFamily: MONO }}>UNDER REVIEW</p>
                       </div>
                     </div>
                   </div>
@@ -699,24 +777,21 @@ export function LabMonitoringPanel() {
                   <p className="text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>{a.id}</p>
                   <div className="flex items-center justify-between mt-1">
                     <span className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>{a.pc}</span>
-                    <span className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>{a.ip}</span>
+                    <span className="text-[#2a3a55]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                      {a.ip}
+                    </span>
                   </div>
                 </div>
               ))}
             </div>
-            <button
-              type="button"
-              className="block w-full text-center text-[#2a3a55] mt-3 bg-transparent border-0 cursor-pointer hover:text-[#4a6080] transition-colors"
-              style={{ fontSize: "9px", fontFamily: MONO, letterSpacing: "0.12em" }}
-              onClick={() => pushToast("Full attendance view — coming in production build", "info")}
-            >
-              VIEW FULL CLASS ({activeCount})
-            </button>
+            <p className="text-[#4a6080] mt-3 text-center" style={{ fontSize: "9px", fontFamily: MONO }}>
+              Active sessions shown from current lab audit evidence.
+            </p>
           </div>
         </div>
 
         {/* System Flag Alert */}
-        {labDef.incidentCount > 0 && showAlert && (
+        {recentWarning && showAlert && (
           <div
             className="rounded-xl p-5 border flex items-start gap-5"
             style={{ background: "#1a0d1a", borderColor: "#e05c6a50" }}
@@ -725,28 +800,60 @@ export function LabMonitoringPanel() {
               <AlertTriangle size={22} className="text-[#e05c6a]" />
             </div>
             <div className="flex-1">
-              <p className="text-[#e05c6a]" style={{ fontSize: "12px", fontFamily: MONO }}>SYSTEM FLAG: TERMINAL PC-01</p>
+              <p className="text-[#e05c6a]" style={{ fontSize: "12px", fontFamily: MONO }}>SYSTEM FLAG</p>
               <p className="text-[#a07080] mt-1" style={{ fontSize: "11px" }}>
-                Security engine detected unknown process "kill_linux_skills.exe" attempting to load an virtual drive.
-                Process quarantined by Runa engine.
+                Latest warning from shared audit stream: {recentWarning}.
               </p>
               <div className="flex items-center gap-3 mt-3">
                 <button
                   type="button"
-                  className="px-4 py-1.5 rounded text-white transition-colors hover:opacity-90"
+                  className="px-4 py-1.5 rounded text-white transition-colors hover:opacity-90 disabled:opacity-50"
                   style={{ background: "#e05c6a", fontSize: "10px", fontFamily: MONO }}
+                  disabled={containBusy}
                   onClick={() => {
-                    pushToast("Terminal session wiped — audit log updated", "warn");
-                    const target =
-                      (expandedPC && pcs.find((p) => p.id === expandedPC)?.status === "alert" && expandedPC) ||
-                      pcs.find((p) => p.status === "alert")?.id ||
-                      null;
-                    if (target) {
+                    void (async () => {
+                      setContainBusy(true);
+                      const target =
+                        (expandedPC && pcs.find((p) => p.id === expandedPC)?.status === "alert" && expandedPC) ||
+                        pcs.find((p) => p.status === "alert")?.id ||
+                        null;
+                      if (!target) {
+                        pushToast("No alert session selected for containment", "info");
+                        setContainBusy(false);
+                        return;
+                      }
+                      const proposal = await proposeAction(
+                        {
+                          type: "lock_cluster",
+                          scope: "lab",
+                          reversible: true,
+                          payload: { labId: activeTab, targetPc: target, source: "system_flag" },
+                          confidence: 0.88,
+                          reasoning: `Containment requested from lab monitoring for ${target} in ${labDef.label}.`,
+                        },
+                        actorId,
+                        "admin",
+                      );
+                      if (proposal.autoExecuted && proposal.result.ok) {
+                        pushToast(`Containment executed for ${target}`, "warn");
+                      } else if (proposal.autoExecuted) {
+                        pushToast(`Containment hard-failed: ${proposal.result.message}`, "error");
+                      } else {
+                        pushToast(`Containment queued for HITL: ${proposal.request.id.slice(0, 8)}…`, "warn");
+                      }
+                      await logAudit({
+                        eventType: "containment_requested",
+                        detail: JSON.stringify({ targetPc: target, source: "system_flag", proposalId: proposal.request.id }),
+                        actorUserId: actorId,
+                        actorRole: "admin",
+                        riskTier: "high",
+                      });
                       setIdleOverrideIds((prev) => new Set(prev).add(target));
-                    }
+                      setContainBusy(false);
+                    })();
                   }}
                 >
-                  WIPE TERMINAL
+                  {containBusy ? "QUEUING..." : "CONTAIN SESSION (GOVERNED)"}
                 </button>
                 <button
                   type="button"
@@ -757,17 +864,10 @@ export function LabMonitoringPanel() {
                     setShowAlert(false);
                   }}
                 >
-                  IGNORE OVERRIDE
+                  ACKNOWLEDGE
                 </button>
-                <div className="ml-auto flex items-center gap-4">
-                  <div>
-                    <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>NETWORK USE</p>
-                    <p className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>68.3 Kbps</p>
-                  </div>
-                  <div>
-                    <p className="text-[#4a6080]" style={{ fontSize: "8px", fontFamily: MONO }}>PACKET LOSS</p>
-                    <p className="text-[#e05c6a]" style={{ fontSize: "10px", fontFamily: MONO }}>8.43%</p>
-                  </div>
+                <div className="ml-auto text-[#4a6080]" style={{ fontSize: "9px", fontFamily: MONO }}>
+                  Source: shared audit evidence
                 </div>
               </div>
             </div>
