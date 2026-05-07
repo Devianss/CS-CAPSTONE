@@ -20,7 +20,7 @@ export interface DemoUser {
 export const DEMO_USERS: DemoUser[] = [
   {
     email: "admin@runa.edu.ph",
-    password: "runa-admin",
+    password: "admin",
     role: "admin",
     displayName: "System Administrator",
   },
@@ -29,6 +29,30 @@ export const DEMO_USERS: DemoUser[] = [
     password: "runa-student",
     role: "student",
     displayName: "John Doe",
+  },
+  {
+    email: "casio@runa.edu.ph",
+    password: "1",
+    role: "student",
+    displayName: "Gen Benedict Casio",
+  },
+  {
+    email: "grospe@runa.edu.ph",
+    password: "1",
+    role: "student",
+    displayName: "Neil Christian Grospe",
+  },
+  {
+    email: "iledan@runa.edu.ph",
+    password: "1",
+    role: "student",
+    displayName: "John Benedict Iledan",
+  },
+  {
+    email: "pardinas@runa.edu.ph",
+    password: "1",
+    role: "student",
+    displayName: "Markjay Pardinas",
   },
 ];
 

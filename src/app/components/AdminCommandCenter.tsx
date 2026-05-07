@@ -21,6 +21,7 @@ import {
   YAxis,
 } from "recharts";
 import { COMLAB_IDS, buildMonitoringPcs, getComlab, type ComlabId } from "../data/comlabs";
+import { PRESENCE_LIVE_WINDOW_MS as PRESENCE_WINDOW_MS } from "../constants/presence";
 import { useAdminLab } from "../context/AdminLabContext";
 import { useElectron } from "../ipc/useElectron";
 import { useNotificationContext } from "../providers/NotificationProvider";
@@ -35,11 +36,12 @@ interface CommandAuditRow {
   id: number;
   createdAt: number;
   eventType: string;
+  eventDescription?: string;
+  threatLevel?: string;
   actorUserId: string;
   actorRole?: string;
   detail?: string;
 }
-const PRESENCE_WINDOW_MS = 90_000;
 let aiHealthCache: { at: number; status: ServiceStatus } | null = null;
 
 function formatAgo(minutes: number): string {
@@ -314,6 +316,7 @@ function extractStation(detail?: string): string {
 }
 
 function describeAuditEvent(row: CommandAuditRow): string {
+  if (row.eventDescription?.trim()) return row.eventDescription.trim();
   const event = row.eventType;
   const actor = row.actorUserId || "system";
   if (event === "presence_heartbeat") return `${actor} reported active session`;

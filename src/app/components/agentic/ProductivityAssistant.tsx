@@ -93,10 +93,11 @@ function stubRespond(prompt: string, role: AgentRole): StubResponse {
 
   // ── Universal refusal triggers ──────────────────────────
   // Anything the agent could be tricked into doing that's clearly out-of-scope.
-  if (/delete|format|erase|rm\s+-rf|drop\s+(table|database)/.test(p)) {
+  if (
+    /format|erase|rm\s+-rf|drop\s+(table|database)|wipe\s+(disk|drive)/i.test(p)
+  ) {
     return {
-      text:
-        role === "student" ? REFUSAL_TEXT_STUDENT : REFUSAL_TEXT_ADMIN,
+      text: role === "student" ? REFUSAL_TEXT_STUDENT : REFUSAL_TEXT_ADMIN,
       refused: true,
     };
   }
@@ -509,6 +510,8 @@ export const ProductivityAssistant = forwardRef<ProductivityAssistantHandle, Pro
         history,
         maxTokens: 1024,
         temperature: 0.3,
+        useKnowledgeBase: true,
+        kbTopK: 5,
       });
       if (ai.ok && typeof ai.response === "string" && ai.response.trim().length > 0) {
         assistantText = ai.response.trim();

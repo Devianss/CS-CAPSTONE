@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import { router } from "./routes";
 import { TitleBar } from "./components/TitleBar";
 import { NotificationProvider } from "./providers/NotificationProvider";
+import { PRESENCE_HEARTBEAT_INTERVAL_MS } from "./constants/presence";
 
 const CONSENT_KEY = "runa.governanceConsent.v1";
 
@@ -38,7 +39,7 @@ export default function App() {
       if (typeof window === "undefined" || !window.electronAPI) return;
       const now = Date.now();
       const visible = typeof document !== "undefined" ? document.visibilityState === "visible" : true;
-      const minIntervalMs = visible ? 30_000 : 60_000;
+      const minIntervalMs = visible ? PRESENCE_HEARTBEAT_INTERVAL_MS : PRESENCE_HEARTBEAT_INTERVAL_MS * 2;
       const visibilityChanged = lastVisible === null ? true : lastVisible !== visible;
       if (reason === "interval" && now - lastSentAt < minIntervalMs) return;
       if (reason === "interval" && !visibilityChanged && now - lastSentAt < minIntervalMs) return;
@@ -73,7 +74,7 @@ export default function App() {
     }
     timer = window.setInterval(() => {
       if (!cancelled) void sendHeartbeat("interval");
-    }, 30_000);
+    }, PRESENCE_HEARTBEAT_INTERVAL_MS);
 
     return () => {
       cancelled = true;

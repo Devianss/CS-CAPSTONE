@@ -27,11 +27,13 @@ export const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   runa_create_folder: "low",
   runa_write_file: "low",
   runa_move_within_vault: "low",
+  runa_read_file: "low",
 
   // MEDIUM — mutates non-critical state OR provides a recommendation
   recommend_action: "medium",
   draft_policy: "medium",
   mark_notification: "medium",
+  runa_delete_within_vault: "medium",
 
   // HIGH — mutates critical state, irreversible, or affects multiple users
   student_hitl_escalation: "high",

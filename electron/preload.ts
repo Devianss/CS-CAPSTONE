@@ -56,6 +56,29 @@ const api = {
     clear: (): Promise<boolean> => ipcRenderer.invoke("session:clear"),
   },
 
+  labStation: {
+    get: (): Promise<{ comlabId: string; workstationLabel: string }> =>
+      ipcRenderer.invoke("labStation:get"),
+    set: (payload: { comlabId: string; workstationLabel: string }): Promise<{
+      comlabId: string;
+      workstationLabel: string;
+    }> => ipcRenderer.invoke("labStation:set", payload),
+  },
+
+  attendance: {
+    checkIn: (payload: {
+      studentEmail: string;
+      comlabId: string;
+      comlabLabel: string;
+      workstationLabel: string;
+      professorName: string;
+    }): Promise<boolean> => ipcRenderer.invoke("attendance:checkIn", payload),
+    checkOut: (payload: { studentEmail: string; comlabId: string }): Promise<boolean> =>
+      ipcRenderer.invoke("attendance:checkOut", payload),
+    list: (comlabId: string, limit?: number): Promise<unknown[]> =>
+      ipcRenderer.invoke("attendance:list", comlabId, limit ?? 500),
+  },
+
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),
     set: (partial: Partial<AppSettings>): Promise<AppSettings> =>
@@ -130,6 +153,15 @@ const api = {
       content: string,
     ): Promise<{ ok: boolean; error?: string; absolute?: string }> =>
       ipcRenderer.invoke("runaFiles:writeTextFile", relativePath, content),
+    readTextFile: (
+      relativePath: string,
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      content?: string;
+      byteLength?: number;
+      absolute?: string;
+    }> => ipcRenderer.invoke("runaFiles:readTextFile", relativePath),
     listDir: (
       relativePath: string,
     ): Promise<{ ok: boolean; entries: string[]; error?: string }> =>
@@ -162,6 +194,8 @@ const api = {
       approverUserId?: string;
       riskTier?: RiskTier;
       confidenceScore?: number;
+      eventDescription?: string;
+      threatLevel?: RiskTier;
     }): Promise<boolean> => ipcRenderer.invoke("audit:log", args),
     list: (limit?: number): Promise<unknown[]> =>
       ipcRenderer.invoke("audit:list", limit),

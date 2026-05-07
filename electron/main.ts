@@ -19,6 +19,7 @@ import {
   sessionRelativeFolder,
   MAX_TEXT_FILE_BYTES,
 } from "./runaFiles";
+import { createStudentRuntimeEnforcement } from "./enforcement/studentRuntimeEnforcement";
 
 function loadRootEnvFile(): void {
   const candidates = [
@@ -69,9 +70,11 @@ type ActionType =
   | "recommend_action"
   | "draft_policy"
   | "mark_notification"
+  | "runa_delete_within_vault"
   | "runa_create_folder"
   | "runa_write_file"
   | "runa_move_within_vault"
+  | "runa_read_file"
   | "student_hitl_escalation"
   | "wipe_terminal"
   | "lock_cluster"
@@ -135,6 +138,10 @@ interface AuditRow {
   id: number;
   createdAt: number;
   eventType: string;
+  /** Short human-readable line for operators (mirrors DB `event_description`). */
+  eventDescription?: string;
+  /** Canonical threat level for this row (mirrors DB `threat_level`). */
+  threatLevel?: RiskTier;
   actorUserId: string;
   actorRole: ActorRole;
   detail: string;
@@ -151,6 +158,11 @@ interface LabShortcutRow {
   targetPath: string;
 }
 
+interface LabStationProfile {
+  comlabId: string;
+  workstationLabel: string;
+}
+
 interface StoreSchema {
   session: {
     userId: string;
@@ -159,6 +171,8 @@ interface StoreSchema {
     persistent: boolean;
     expiresAt: number;
   } | null;
+  /** This machine's comlab + PC label (student attendance / institutional reporting). */
+  labStationProfile: LabStationProfile;
   settings: {
     kioskMode: boolean;
     theme: "dark" | "light";
@@ -200,6 +214,7 @@ const HAS_ICON = fsSync.existsSync(ICON_PATH);
 const store = new Store({
   defaults: {
     session: null,
+    labStationProfile: { comlabId: "08", workstationLabel: "PC-01" } satisfies LabStationProfile,
     settings: {
       kioskMode: false,
       theme: "dark",
@@ -290,6 +305,8 @@ const CLOUD_ENDPOINTS = {
 
 const CLOUD_TIMEOUT_MS = 15_000;
 
+const COMLAB_STATION_IDS = ["08", "09", "10", "11"] as const;
+
 async function cloudCall<T>(
   url: string,
   body: Record<string, unknown>,
@@ -328,6 +345,37 @@ async function cloudCall<T>(
   }
 }
 
+async function attendanceCheckOutCloud(studentEmail: string, comlabId: string): Promise<void> {
+  const data = await cloudCall<{ ok?: boolean; error?: string }>(CLOUD_ENDPOINTS.audit, {
+    op: "attendance_check_out",
+    studentEmail,
+    comlabId,
+  });
+  if (data && "ok" in data && data.ok === false) {
+    throw new Error(data.error ?? "attendance_check_out failed");
+  }
+}
+
+async function attendanceListCloud(comlabId: string, limit: number): Promise<unknown[]> {
+  const data = await cloudCall<{ ok?: boolean; rows?: unknown[] }>(CLOUD_ENDPOINTS.audit, {
+    op: "attendance_list",
+    comlabId,
+    limit,
+  });
+  return Array.isArray(data.rows) ? data.rows : [];
+}
+
+function getLabStationProfile(): LabStationProfile {
+  const raw = store.get("labStationProfile") as LabStationProfile | undefined;
+  if (raw && COMLAB_STATION_IDS.includes(raw.comlabId as (typeof COMLAB_STATION_IDS)[number])) {
+    return {
+      comlabId: raw.comlabId,
+      workstationLabel: String(raw.workstationLabel ?? "PC-01").slice(0, 64),
+    };
+  }
+  return { comlabId: "08", workstationLabel: "PC-01" };
+}
+
 const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   chat_response: "low",
   audit_query: "low",
@@ -336,9 +384,11 @@ const RISK_RULES: Readonly<Record<ActionType, RiskTier>> = {
   recommend_action: "medium",
   draft_policy: "medium",
   mark_notification: "medium",
+  runa_delete_within_vault: "medium",
   runa_create_folder: "low",
   runa_write_file: "low",
   runa_move_within_vault: "low",
+  runa_read_file: "low",
   student_hitl_escalation: "high",
   wipe_terminal: "high",
   lock_cluster: "high",
@@ -379,6 +429,44 @@ function fromIsoMaybe(v: string | null | undefined, fallback = Date.now()): numb
   if (!v) return fallback;
   const parsed = Date.parse(v);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeAuditCreatedAtMs(createdAt: unknown): number {
+  if (typeof createdAt === "number" && Number.isFinite(createdAt)) return createdAt;
+  if (typeof createdAt === "string") return fromIsoMaybe(createdAt);
+  return Date.now();
+}
+
+/** Collapse duplicate rows when the same event exists locally and in Supabase (second-level bucket). */
+function auditStreamDedupeKey(row: AuditRow): string {
+  const tSec = Math.floor(normalizeAuditCreatedAtMs(row.createdAt) / 1000);
+  const detailHead = (row.detail ?? "").slice(0, 96);
+  return `${row.eventType}\0${row.actorUserId}\0${tSec}\0${detailHead}`;
+}
+
+function normalizeAuditRowTimestamps(row: AuditRow): AuditRow {
+  return {
+    ...row,
+    createdAt: normalizeAuditCreatedAtMs(row.createdAt),
+  };
+}
+
+/**
+ * Supabase list can be empty or lag behind while `logEvent` has already appended to electron-store.
+ * Never replace local-only history with an empty remote response.
+ */
+function mergeAuditStreams(remote: AuditRow[], local: AuditRow[]): AuditRow[] {
+  const merged = new Map<string, AuditRow>();
+  for (const r of remote.map(normalizeAuditRowTimestamps)) {
+    merged.set(auditStreamDedupeKey(r), r);
+  }
+  for (const r of local.map(normalizeAuditRowTimestamps)) {
+    const k = auditStreamDedupeKey(r);
+    if (!merged.has(k)) merged.set(k, r);
+  }
+  return Array.from(merged.values()).sort(
+    (a, b) => normalizeAuditCreatedAtMs(b.createdAt) - normalizeAuditCreatedAtMs(a.createdAt),
+  );
 }
 
 async function listApprovalsRemote(): Promise<ApprovalRequest[]> {
@@ -441,16 +529,22 @@ function nextAuditId(): number {
 }
 
 function logEvent(row: Omit<AuditRow, "id" | "createdAt"> & { id?: number; createdAt?: number }): AuditRow {
+  const threatLevel: RiskTier = row.threatLevel ?? row.riskTier ?? "low";
+  const eventDescription =
+    row.eventDescription?.trim() ||
+    row.eventType.replace(/_/g, " ");
   const full: AuditRow = {
     id: row.id ?? nextAuditId(),
     createdAt: row.createdAt ?? Date.now(),
     eventType: row.eventType,
+    eventDescription,
+    threatLevel,
     actorUserId: row.actorUserId,
     actorRole: row.actorRole,
     detail: row.detail,
     approvalId: row.approvalId,
     approverUserId: row.approverUserId,
-    riskTier: row.riskTier,
+    riskTier: row.riskTier ?? threatLevel,
     confidenceScore: row.confidenceScore,
   };
   setAuditRows([...getAuditRows(), full]);
@@ -467,19 +561,33 @@ async function listAuditRemote(limit = 200): Promise<AuditRow[]> {
     const incoming = Array.isArray(response.rows) ? response.rows : [];
     return incoming.map((row, idx) => {
       const r = row as Record<string, unknown>;
+      const createdRaw = r.createdAt ?? r.created_at;
       return {
         id: Number(r.id ?? idx + 1),
         createdAt:
-          typeof r.createdAt === "number" ? r.createdAt : fromIsoMaybe(String(r.createdAt ?? "")),
-        eventType: String(r.eventType ?? "unknown"),
-        actorUserId: String(r.actorUserId ?? "unknown"),
-        actorRole: (r.actorRole ?? "system") as ActorRole,
+          typeof createdRaw === "number"
+            ? createdRaw
+            : fromIsoMaybe(String(createdRaw ?? "")),
+        eventType: String(r.eventType ?? r.event_type ?? "unknown"),
+        eventDescription:
+          typeof r.eventDescription === "string"
+            ? r.eventDescription
+            : typeof r.event_description === "string"
+              ? r.event_description
+              : undefined,
+        threatLevel: (r.threatLevel ?? r.threat_level) as RiskTier | undefined,
+        actorUserId: String(r.actorUserId ?? r.actor_user_id ?? "unknown"),
+        actorRole: (r.actorRole ?? r.actor_role ?? "system") as ActorRole,
         detail: String(r.detail ?? ""),
-        approvalId: (r.approvalId as string | undefined) ?? undefined,
-        approverUserId: (r.approverUserId as string | undefined) ?? undefined,
-        riskTier: (r.riskTier as RiskTier | undefined) ?? undefined,
+        approvalId: (r.approvalId ?? r.approval_id) as string | undefined,
+        approverUserId: (r.approverUserId ?? r.approver_user_id) as string | undefined,
+        riskTier: (r.riskTier ?? r.risk_tier) as RiskTier | undefined,
         confidenceScore:
-          typeof r.confidenceScore === "number" ? r.confidenceScore : undefined,
+          typeof r.confidenceScore === "number"
+            ? r.confidenceScore
+            : typeof r.confidence_score === "number"
+              ? r.confidence_score
+              : undefined,
       };
     });
   } catch (e) {
@@ -589,6 +697,65 @@ function executeAction(action: AgentAction): ActionExecutionResult {
     }
   }
 
+  if (action.type === "runa_read_file") {
+    const rel = String(action.payload.relativePath ?? "").trim();
+    if (!rel) {
+      return { ok: false, status: "hard_failed", message: "relativePath is required." };
+    }
+    const resolved = resolveUnderVault(app, rel);
+    if (!resolved.ok) return { ok: false, status: "hard_failed", message: resolved.error };
+    try {
+      const st = fsSync.statSync(resolved.absolute);
+      if (st.isDirectory()) {
+        return { ok: false, status: "hard_failed", message: "Path is a directory, not a file." };
+      }
+      if (st.size > MAX_TEXT_FILE_BYTES) {
+        return {
+          ok: false,
+          status: "hard_failed",
+          message: `File exceeds maximum size (${MAX_TEXT_FILE_BYTES} bytes).`,
+        };
+      }
+      const text = fsSync.readFileSync(resolved.absolute, { encoding: "utf8" });
+      return {
+        ok: true,
+        status: "executed",
+        message: `Read ${st.size} byte(s) from Runa_Folder: ${rel}`,
+        evidence: { relativePath: rel, content: text, byteLength: st.size },
+      };
+    } catch (e) {
+      return { ok: false, status: "hard_failed", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  if (action.type === "runa_delete_within_vault") {
+    const rel = String(action.payload.relativePath ?? "").trim();
+    if (!rel) {
+      return { ok: false, status: "hard_failed", message: "relativePath is required." };
+    }
+    const resolved = resolveUnderVault(app, rel);
+    if (!resolved.ok) return { ok: false, status: "hard_failed", message: resolved.error };
+    try {
+      const st = fsSync.statSync(resolved.absolute);
+      if (st.isDirectory()) {
+        return {
+          ok: false,
+          status: "hard_failed",
+          message: "Refusing to delete directories — only single files under Runa_Folder.",
+        };
+      }
+      fsSync.unlinkSync(resolved.absolute);
+      return {
+        ok: true,
+        status: "executed",
+        message: `Deleted file under Runa_Folder: ${rel}`,
+        evidence: { relativePath: rel },
+      };
+    } catch (e) {
+      return { ok: false, status: "hard_failed", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   if (action.type === "student_hitl_escalation") {
     return {
       ok: true,
@@ -669,6 +836,50 @@ function executeAction(action: AgentAction): ActionExecutionResult {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let pythonProcess: ChildProcess | null = null;
+let stopStudentEnforcement: (() => void) | null = null;
+
+function syncStudentRuntimeEnforcement(): void {
+  if (stopStudentEnforcement) {
+    stopStudentEnforcement();
+    stopStudentEnforcement = null;
+  }
+  const session = store.get("session");
+  if (!session || session.role !== "student") return;
+
+  const ctl = createStudentRuntimeEnforcement({
+    pythonPort: PYTHON_PORT,
+    pollIntervalMs: 15_000,
+    getSession: () => store.get("session"),
+    getBlockedDomains: async () => {
+      try {
+        return await readBlockedDomainsShared();
+      } catch {
+        const local = store.get("blockedDomains") as string[] | undefined;
+        return Array.isArray(local) ? local : [];
+      }
+    },
+    logStructured: (row) => {
+      logEvent({
+        eventType: row.eventType,
+        eventDescription: row.eventDescription,
+        threatLevel: row.threatLevel,
+        detail: row.detail,
+        actorUserId: row.actorUserId,
+        actorRole: row.actorRole,
+        riskTier: row.riskTier ?? row.threatLevel,
+      });
+    },
+    notifyTray: (title, body) => {
+      if (!tray) return;
+      try {
+        tray.displayBalloon({ title, content: body });
+      } catch {
+        /* optional */
+      }
+    },
+  });
+  stopStudentEnforcement = ctl.stop;
+}
 
 // ─────────────────────────────────────────────
 //  Python microservice launcher
@@ -861,12 +1072,82 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("session:set", (_event, session: StoreSchema["session"]) => {
     store.set("session", session);
+    syncStudentRuntimeEnforcement();
     return true;
   });
 
-  ipcMain.handle("session:clear", () => {
+  ipcMain.handle("session:clear", async () => {
+    const prev = store.get("session");
+    if (prev?.role === "student") {
+      const station = getLabStationProfile();
+      try {
+        await attendanceCheckOutCloud(prev.userId, station.comlabId);
+      } catch (e) {
+        console.warn("[main] Attendance check-out skipped or failed:", e);
+      }
+    }
     store.set("session", null);
+    syncStudentRuntimeEnforcement();
     return true;
+  });
+
+  ipcMain.handle("labStation:get", () => getLabStationProfile());
+
+  ipcMain.handle("labStation:set", (_e, profile: LabStationProfile) => {
+    const cid = String(profile?.comlabId ?? "08").trim();
+    const ws = String(profile?.workstationLabel ?? "PC-01").trim().slice(0, 64);
+    if (!COMLAB_STATION_IDS.includes(cid as (typeof COMLAB_STATION_IDS)[number])) {
+      throw new Error("Invalid comlabId (use 08–11).");
+    }
+    if (!ws) {
+      throw new Error("workstationLabel required.");
+    }
+    store.set("labStationProfile", { comlabId: cid, workstationLabel: ws });
+    return getLabStationProfile();
+  });
+
+  ipcMain.handle(
+    "attendance:checkIn",
+    async (
+      _e,
+      payload: {
+        studentEmail: string;
+        comlabId: string;
+        comlabLabel: string;
+        workstationLabel: string;
+        professorName: string;
+      },
+    ) => {
+      const data = await cloudCall<{ ok?: boolean; error?: string }>(CLOUD_ENDPOINTS.audit, {
+        op: "attendance_check_in",
+        studentEmail: payload.studentEmail,
+        comlabId: payload.comlabId,
+        comlabLabel: payload.comlabLabel ?? "",
+        workstationLabel: payload.workstationLabel ?? "",
+        professorName: payload.professorName ?? "",
+      });
+      if (data && "ok" in data && data.ok === false) {
+        throw new Error(data.error ?? "attendance_check_in failed");
+      }
+      return true;
+    },
+  );
+
+  ipcMain.handle(
+    "attendance:checkOut",
+    async (_e, payload: { studentEmail: string; comlabId: string }) => {
+      await attendanceCheckOutCloud(payload.studentEmail, payload.comlabId);
+      return true;
+    },
+  );
+
+  ipcMain.handle("attendance:list", async (_e, comlabId: string, limit = 500) => {
+    try {
+      return await attendanceListCloud(String(comlabId || "08").trim(), Math.min(1000, Math.max(1, limit)));
+    } catch (e) {
+      console.warn("[main] attendance:list failed:", e);
+      return [];
+    }
   });
 
   // ── Settings ────────────────────────────────
@@ -1210,6 +1491,54 @@ function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.handle("runaFiles:readTextFile", (_e, relativePath: string) => {
+    const session = store.get("session");
+    if (!session?.userId) {
+      return { ok: false as const, error: "Not signed in." };
+    }
+    const rel = String(relativePath ?? "").trim();
+    if (!rel) {
+      return { ok: false as const, error: "relativePath is required." };
+    }
+    const resolved = resolveUnderVault(app, rel);
+    if (!resolved.ok) {
+      return { ok: false as const, error: resolved.error };
+    }
+    try {
+      const st = fsSync.statSync(resolved.absolute);
+      if (st.isDirectory()) {
+        return { ok: false as const, error: "Path is a directory, not a file." };
+      }
+      if (st.size > MAX_TEXT_FILE_BYTES) {
+        return { ok: false as const, error: `File too large (max ${MAX_TEXT_FILE_BYTES} bytes).` };
+      }
+      const text = fsSync.readFileSync(resolved.absolute, { encoding: "utf8" });
+      logEvent({
+        eventType: "runa_files_read",
+        detail: JSON.stringify({ relativePath: rel, bytes: st.size }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return {
+        ok: true as const,
+        absolute: resolved.absolute,
+        content: text,
+        byteLength: st.size,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logEvent({
+        eventType: "runa_files_error",
+        detail: JSON.stringify({ op: "read", relativePath: rel, error: msg }),
+        actorUserId: session.userId,
+        actorRole: session.role,
+        riskTier: "low",
+      });
+      return { ok: false as const, error: msg };
+    }
+  });
+
   ipcMain.handle("runaFiles:listDir", (_e, relativePath: string) => {
     const session = store.get("session");
     if (!session?.userId) {
@@ -1274,6 +1603,8 @@ function registerIpcHandlers(): void {
         approverUserId?: string;
         riskTier?: RiskTier;
         confidenceScore?: number;
+        eventDescription?: string;
+        threatLevel?: RiskTier;
       },
     ) => {
       logEvent({
@@ -1285,19 +1616,25 @@ function registerIpcHandlers(): void {
         approverUserId: args.approverUserId,
         riskTier: args.riskTier,
         confidenceScore: args.confidenceScore,
+        eventDescription: args.eventDescription,
+        threatLevel: args.threatLevel,
       });
       return true;
     },
   );
 
   ipcMain.handle("audit:list", async (_e, limit = 200) => {
-    const remoteRows = await listAuditRemote(limit);
-    if (remoteRows) {
-      setAuditRows(remoteRows);
-      return remoteRows;
+    const cap = Math.min(AUDIT_LIMIT, Math.max(limit, 250));
+    let remoteRows: AuditRow[] = [];
+    try {
+      remoteRows = await listAuditRemote(cap);
+    } catch (e) {
+      console.warn("[main] audit:list: remote audit unavailable — merging local only:", e);
     }
-    const rows = getAuditRows();
-    return [...rows].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+    const localRows = getAuditRows();
+    const merged = mergeAuditStreams(remoteRows, localRows);
+    setAuditRows(merged.slice(0, AUDIT_LIMIT));
+    return merged.slice(0, limit);
   });
 
   // ── Agent / HITL queue ───────────────────────
@@ -1545,6 +1882,7 @@ app.whenReady().then(() => {
   startPythonService();
   mainWindow = createMainWindow();
   tray = createTray();
+  syncStudentRuntimeEnforcement();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1559,6 +1897,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  if (stopStudentEnforcement) {
+    stopStudentEnforcement();
+    stopStudentEnforcement = null;
+  }
   stopPythonService();
 });
 

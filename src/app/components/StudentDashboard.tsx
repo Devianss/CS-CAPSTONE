@@ -16,6 +16,7 @@ import { ProductivityAssistant } from "./agentic/ProductivityAssistant";
 import { StudentRpaSidePanel } from "./student/rpaSidePanel/StudentRpaSidePanel";
 import { useElectron } from "../ipc/useElectron";
 import { findDemoUser } from "../auth/demoUsers";
+import { COMLAB_DEFINITIONS } from "../data/comlabs";
 import type { ElectronLabShortcut } from "../../types/electron";
 
 const MONO = "'Share Tech Mono', monospace";
@@ -92,6 +93,8 @@ export function StudentDashboard() {
     level: "allowed" | "blocked" | "warn";
     text: string;
   } | null>(null);
+  const [labComlabId, setLabComlabId] = useState("08");
+  const [labPcLabel, setLabPcLabel] = useState("PC-01");
 
   const refreshShortcuts = useCallback(async () => {
     const list = await api.lab.getShortcuts();
@@ -124,6 +127,15 @@ export function StudentDashboard() {
       }
       const vr = await api.runaFiles.getVaultRoot();
       if (!cancelled && vr.ok && vr.path) setVaultPath(vr.path);
+      try {
+        const st = await api.labStation.get();
+        if (!cancelled) {
+          setLabComlabId(String(st.comlabId || "08").trim());
+          setLabPcLabel(String(st.workstationLabel || "PC-01").trim());
+        }
+      } catch {
+        /* ignore */
+      }
       if (!cancelled) await refreshShortcuts();
     })();
     return () => {
@@ -199,6 +211,22 @@ export function StudentDashboard() {
   const handleLogout = async () => {
     await api.session.clear();
     navigate("/");
+  };
+
+  const saveLabStation = async () => {
+    const ws = labPcLabel.trim() || "PC-01";
+    try {
+      const saved = await api.labStation.set({ comlabId: labComlabId, workstationLabel: ws });
+      setLabComlabId(saved.comlabId);
+      setLabPcLabel(saved.workstationLabel);
+      pushToast("Comlab / PC saved for attendance logs", "success");
+      void api.telemetry.record("lab_station_profile_saved", {
+        comlabId: saved.comlabId,
+        workstationLabel: saved.workstationLabel,
+      });
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Could not save workstation", "error");
+    }
   };
 
   const runSiteCheck = async () => {
@@ -542,6 +570,72 @@ export function StudentDashboard() {
                 </p>
               )}
             </div>
+            <div
+              className="rounded-md border px-3 py-2 mt-2"
+              style={{ background: "#111d30", borderColor: "#1e2e48" }}
+            >
+              <div className="flex items-center gap-2 mb-2">
+                <Monitor size={12} className="text-[#3a6fff]" />
+                <span className="text-[#c5d5ea]" style={{ fontSize: "10px", fontFamily: MONO }}>
+                  This workstation (attendance)
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2 items-end">
+                <label className="flex flex-col gap-0.5 min-w-[100px]">
+                  <span className="text-[#4a6080] uppercase" style={{ fontSize: "7px", fontFamily: MONO }}>
+                    Comlab
+                  </span>
+                  <select
+                    value={labComlabId}
+                    onChange={(e) => setLabComlabId(e.target.value)}
+                    className="rounded-sm px-2 py-1.5 border outline-none"
+                    style={{
+                      background: "#0f1a2a",
+                      borderColor: "#1e2e48",
+                      color: "#c5d5ea",
+                      fontSize: "11px",
+                      fontFamily: MONO,
+                    }}
+                  >
+                    {COMLAB_DEFINITIONS.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-0.5 min-w-[120px] flex-1">
+                  <span className="text-[#4a6080] uppercase" style={{ fontSize: "7px", fontFamily: MONO }}>
+                    PC label
+                  </span>
+                  <input
+                    value={labPcLabel}
+                    onChange={(e) => setLabPcLabel(e.target.value)}
+                    placeholder="e.g. PC-01"
+                    className="rounded-sm px-2 py-1.5 border outline-none w-full max-w-[200px]"
+                    style={{
+                      background: "#0f1a2a",
+                      borderColor: "#1e2e48",
+                      color: "#c5d5ea",
+                      fontSize: "11px",
+                      fontFamily: MONO,
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void saveLabStation()}
+                  className="px-3 py-1.5 rounded-sm"
+                  style={{ background: "#2a5080", color: "#c5d5ea", fontSize: "10px", fontFamily: MONO }}
+                >
+                  Save
+                </button>
+              </div>
+              <p className="text-[#4a6080] mt-1.5" style={{ fontSize: "9px", fontFamily: MONO }}>
+                Professor on record comes from the selected comlab schedule. Log in again to open a new attendance row
+                after changing comlab.
+              </p>
+            </div>
           </div>
           <div className="flex-1 min-h-0 p-4 pt-2 box-border flex flex-col">
             <ProductivityAssistant
@@ -605,7 +699,9 @@ export function StudentDashboard() {
           </div>
           <div className="flex items-center gap-1.5 text-[#4a6080]" style={{ fontSize: "10px", fontFamily: MONO }}>
             <Monitor size={11} />
-            <span className="tracking-widest uppercase">UNIT-04</span>
+            <span className="tracking-widest uppercase">
+              COMLAB {labComlabId} · {labPcLabel}
+            </span>
           </div>
           <div className="text-[#4a6080] text-right tabular-nums" style={{ fontSize: "10px", fontFamily: MONO }}>
             <div>{timeStr}</div>

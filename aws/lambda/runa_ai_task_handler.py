@@ -1,13 +1,20 @@
 import json
 import logging
 import os
-from urllib import error, request
+import re
+from urllib import error, parse, request
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 DEMO_SHARED_TOKEN = os.environ.get("DEMO_SHARED_TOKEN", "").strip()
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MAX_HISTORY_TURNS = 24
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+KB_TABLE = os.environ.get("RUNA_KB_TABLE", "runa_knowledge_chunks").strip()
+KB_TOP_K = max(1, min(int(os.environ.get("RUNA_KB_TOP_K", "5")), 12))
+KB_MAX_CHUNK = max(200, min(int(os.environ.get("RUNA_KB_MAX_CHUNK_CHARS", "900")), 4000))
 
 logging.basicConfig(level=logging.INFO, format="[runa-ai-task] %(message)s")
 log = logging.getLogger(__name__)
@@ -24,6 +31,115 @@ def _resp(status_code: int, body: dict):
         },
         "body": json.dumps(body),
     }
+
+
+def _kb_supabase_headers():
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
+
+
+def _kb_fetch_chunks(invoke_role: str) -> list[dict]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return []
+    or_vis = (
+        "or=(visibility.eq.both,visibility.eq.student)"
+        if invoke_role == "student"
+        else "or=(visibility.eq.both,visibility.eq.admin)"
+    )
+    q = f"select=id,source,title,content&limit=800&{or_vis}"
+    url = f"{SUPABASE_URL}/rest/v1/{KB_TABLE}?{q}"
+    try:
+        req = request.Request(url, method="GET", headers=_kb_supabase_headers())
+        with request.urlopen(req, timeout=12) as res:
+            raw = res.read().decode("utf-8")
+            data = json.loads(raw) if raw else []
+            return data if isinstance(data, list) else []
+    except Exception as exc:
+        log.warning("kb_fetch_failed: %s", str(exc)[:200])
+        return []
+
+
+def _kb_tokenize(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def _kb_score(query: str, chunk_text: str) -> float:
+    q = _kb_tokenize(query)
+    c = _kb_tokenize(chunk_text)
+    if not q or not c:
+        return 0.0
+    return float(len(q & c)) / (len(q) ** 0.5 + 0.01)
+
+
+def _kb_select(prompt: str, chunks: list[dict], top_k: int) -> tuple[list[dict], list[dict]]:
+    scored: list[tuple[float, dict]] = []
+    for row in chunks:
+        if not isinstance(row, dict):
+            continue
+        cid = row.get("id")
+        body = str(row.get("content") or "")
+        if not body or cid is None:
+            continue
+        bag = body + " " + str(row.get("title") or "") + " " + str(row.get("source") or "")
+        scored.append((_kb_score(prompt, bag), row))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    picked: list[dict] = []
+    cites: list[dict] = []
+    filled = 0
+    for score, row in scored:
+        if filled >= top_k:
+            break
+        if score <= 0 and filled >= 1:
+            break
+        body = str(row.get("content") or "")
+        if len(body) > KB_MAX_CHUNK:
+            body = body[: KB_MAX_CHUNK - 20] + "\n… (truncated)"
+        picked.append(
+            {
+                "id": row.get("id"),
+                "source": row.get("source"),
+                "title": row.get("title"),
+                "content": body,
+            }
+        )
+        cites.append(
+            {
+                "id": row.get("id"),
+                "source": row.get("source"),
+                "title": row.get("title"),
+                "score": round(score, 4),
+            }
+        )
+        filled += 1
+    if not picked and scored:
+        row = scored[0][1]
+        body = str(row.get("content") or "")[:KB_MAX_CHUNK]
+        picked.append({"id": row.get("id"), "source": row.get("source"), "title": row.get("title"), "content": body})
+        cites.append({"id": row.get("id"), "source": row.get("source"), "title": row.get("title"), "score": 0.0})
+    return picked, cites
+
+
+def _kb_context_block(chunks: list[dict]) -> str:
+    lines = [
+        "Knowledge base excerpts (RUNA). When you use a fact from a chunk, cite it as [KB:<id>]. "
+        "If nothing matches the user's question, say the KB has no matching entry and answer with general safe guidance."
+    ]
+    for ch in chunks:
+        cid = ch.get("id")
+        title = str(ch.get("title") or "").strip()
+        src = str(ch.get("source") or "").strip()
+        body = str(ch.get("content") or "").strip()
+        header = f"[KB:{cid}]"
+        if title:
+            header += f" {title}"
+        if src:
+            header += f" (source: {src})"
+        lines.append(header)
+        lines.append(body)
+        lines.append("---")
+    return "\n".join(lines)
 
 
 def _normalize_history(history):
@@ -87,6 +203,11 @@ def lambda_handler(event, _context):
     history = body.get("history") if isinstance(body.get("history"), list) else []
     max_tokens = int(body.get("maxTokens", 1024) or 1024)
     temperature = float(body.get("temperature", 0.3) or 0.3)
+    use_knowledge_base = body.get("useKnowledgeBase", True)
+    if isinstance(use_knowledge_base, str):
+        use_knowledge_base = use_knowledge_base.lower() in ("1", "true", "yes")
+    kb_top = int(body.get("kbTopK", KB_TOP_K) or KB_TOP_K)
+    kb_top = max(1, min(kb_top, 12))
 
     if not prompt:
         log.warning("prompt_required request_id=%s", request_id)
@@ -110,6 +231,21 @@ def lambda_handler(event, _context):
     if tools:
         tool_hint = f"\n\nTool ids for this session: {', '.join(str(t) for t in tools)}."
     full_system = f"{system}{tool_hint}\nrole: {role}."
+
+    rag_citations: list[dict] = []
+    if use_knowledge_base:
+        rows = _kb_fetch_chunks(role)
+        kb_chunks, rag_citations = _kb_select(prompt, rows, kb_top)
+        if kb_chunks:
+            full_system = full_system + "\n\n" + _kb_context_block(kb_chunks)
+            log.info(
+                "kb_applied request_id=%s chunks=%d citations=%s",
+                request_id,
+                len(kb_chunks),
+                [c.get("id") for c in rag_citations],
+            )
+        else:
+            log.info("kb_empty request_id=%s", request_id)
 
     groq_messages = [{"role": "system", "content": full_system}]
     groq_messages.extend(_normalize_history(history))
@@ -188,6 +324,8 @@ def lambda_handler(event, _context):
                 "outputTokens": output_tokens,
                 "totalTokens": total_tokens,
                 "updatedHistory": updated_history,
+                "ragCitations": rag_citations,
+                "ragUsed": bool(use_knowledge_base and rag_citations),
             },
         )
     except Exception as exc:
@@ -202,5 +340,7 @@ def lambda_handler(event, _context):
                 ),
                 "source": "local_fallback",
                 "detail": str(exc)[:400],
+                "ragCitations": [],
+                "ragUsed": False,
             },
         )

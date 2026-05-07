@@ -112,6 +112,8 @@ export async function logAudit(args: {
   approverUserId?: string;
   riskTier?: RiskTier;
   confidenceScore?: number;
+  eventDescription?: string;
+  threatLevel?: RiskTier;
 }) {
   return await window.electronAPI.audit.log(args);
 }

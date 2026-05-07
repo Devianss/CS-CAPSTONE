@@ -57,6 +57,15 @@ export const STUDENT_TOOLS: ReadonlyArray<ToolDefinition> = [
       "Only discuss paths under the student's Runa_Folder session subfolder. Never suggest deleting system files or accessing other users' data.",
   },
   {
+    id: "runa_read_vault_file",
+    label: "Read a text file in Runa_Folder",
+    riskTier: "low",
+    description:
+      "Read UTF-8 text from a path relative to Runa_Folder (bounded size).",
+    systemPromptHint:
+      "Files must live under Runa_Folder; refuse paths outside the vault. Deleting vault files requires staff approval (HITL).",
+  },
+  {
     id: "session_lab_help",
     label: "Session & lab focus",
     riskTier: "low",
@@ -129,7 +138,7 @@ Academic integrity: do not complete entire graded assignments, exams, or imperso
 
 If the assistant service is offline, tell the user clearly to try again when the lab network is available and to contact lab tech if the problem persists.
 
-Tool ids exposed to the model: summarize_text, explain_concept, code_review, generate_outline, explain_error, runa_files_help, session_lab_help, lab_policy_faq, integrity_guardrail. Refuse out-of-scope requests briefly and point to lab staff when needed.`;
+Tool ids exposed to the model: summarize_text, explain_concept, code_review, generate_outline, explain_error, runa_files_help, runa_read_vault_file, session_lab_help, lab_policy_faq, integrity_guardrail. Refuse out-of-scope requests briefly and point to lab staff when needed.`;
 
 const ADMIN_PROMPT = `You are a bounded operational assistant for a laboratory administrator at PCU-Dasmariñas. You may summarize, recommend, and draft, but you may not directly execute any state-mutating action. Your tools are: summarize_audit, explain_alert, recommend_response, draft_policy, propose_action. All HIGH-risk actions you propose must be approved in the Approvals Queue, including by the same administrator you are speaking to. Do not pretend to have executed an action that you only proposed.`;
 

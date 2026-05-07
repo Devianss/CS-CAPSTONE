@@ -27,9 +27,11 @@ export type ElectronActionType =
   | "recommend_action"
   | "draft_policy"
   | "mark_notification"
+  | "runa_delete_within_vault"
   | "runa_create_folder"
   | "runa_write_file"
   | "runa_move_within_vault"
+  | "runa_read_file"
   | "student_hitl_escalation"
   | "wipe_terminal"
   | "lock_cluster"
@@ -88,6 +90,8 @@ export interface ElectronAuditRow {
   id: number;
   createdAt: number;
   eventType: string;
+  eventDescription?: string;
+  threatLevel?: ElectronRiskTier;
   actorUserId: string;
   actorRole: ElectronActorRole;
   detail: string;
@@ -95,6 +99,19 @@ export interface ElectronAuditRow {
   approverUserId?: string;
   riskTier?: ElectronRiskTier;
   confidenceScore?: number;
+}
+
+/** Row from `lab_attendance_sessions` (Lambda returns camelCase). */
+export interface ElectronAttendanceSessionRow {
+  id: string | number;
+  studentEmail?: string;
+  comlabId?: string;
+  comlabLabel?: string;
+  workstationLabel?: string;
+  professorName?: string;
+  timeIn?: string;
+  timeOut?: string | null;
+  lastSeenAt?: string | null;
 }
 
 export type ElectronProposeResult =
@@ -123,7 +140,7 @@ interface ElectronSettings {
   notifications: boolean;
 }
 
-interface PythonResult<T = unknown> {
+export interface PythonResult<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
@@ -189,6 +206,9 @@ interface ElectronAPI {
       relativePath: string,
       content: string,
     ): Promise<{ ok: boolean; error?: string; absolute?: string }>;
+    readTextFile(
+      relativePath: string,
+    ): Promise<{ ok: boolean; error?: string; content?: string; byteLength?: number; absolute?: string }>;
     listDir(relativePath: string): Promise<{ ok: boolean; entries: string[]; error?: string }>;
   };
   telemetry: {
@@ -213,6 +233,24 @@ interface ElectronAPI {
       confidenceScore?: number;
     }): Promise<boolean>;
     list(limit?: number): Promise<ElectronAuditRow[]>;
+  };
+  labStation: {
+    get(): Promise<{ comlabId: string; workstationLabel: string }>;
+    set(payload: { comlabId: string; workstationLabel: string }): Promise<{
+      comlabId: string;
+      workstationLabel: string;
+    }>;
+  };
+  attendance: {
+    checkIn(payload: {
+      studentEmail: string;
+      comlabId: string;
+      comlabLabel: string;
+      workstationLabel: string;
+      professorName: string;
+    }): Promise<boolean>;
+    checkOut(payload: { studentEmail: string; comlabId: string }): Promise<boolean>;
+    list(comlabId: string, limit?: number): Promise<ElectronAttendanceSessionRow[]>;
   };
   agent: {
     propose(args: {

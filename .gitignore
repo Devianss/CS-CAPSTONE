@@ -5,6 +5,10 @@ python-service/.env
 python-service/__pycache__/
 python-service/*.pyc
 
+# Python bytecode (any path)
+__pycache__/
+*.py[cod]
+
 dist/
 dist-electron/
 
@@ -14,3 +18,6 @@ digest.txt
 src/digest.txt
 # Windows accidental artifact
 nul
+
+# Local ad-hoc bundles (not source)
+release.rar

@@ -5,6 +5,7 @@ import { useElectron } from "../ipc/useElectron";
 import { logAudit, proposeAction } from "../agentic/approvalQueue";
 import { useAdminLab } from "../context/AdminLabContext";
 import { buildAccessNodes, COMLAB_DEFINITIONS, getComlab } from "../data/comlabs";
+import { PRESENCE_LIVE_WINDOW_MS as PRESENCE_WINDOW_MS } from "../constants/presence";
 import { ADMIN_FONT_MONO, ADMIN_FONT_SANS, ADMIN_HEADER_TITLE_SIZE, ADMIN_PANEL_CLASS, ADMIN_PANEL_STYLE } from "./admin/adminUiTokens";
 
 const MONO = ADMIN_FONT_MONO;
@@ -159,7 +160,6 @@ export function AccessControlPanel() {
 
   useEffect(() => {
     let alive = true;
-    const PRESENCE_WINDOW_MS = 90_000;
     const loadAuditLogs = async () => {
       try {
         const rows = (await api.audit.list(120)) as AccessAuditRow[];

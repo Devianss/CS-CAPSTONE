@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { authenticate } from "../auth/demoUsers";
 import { useElectron } from "../ipc/useElectron";
+import { getComlab } from "../data/comlabs";
+import type { ElectronRole } from "../../types/electron";
 
 const MONO = "'Share Tech Mono', monospace";
 const GROTESK = "'Exo 2', sans-serif";
@@ -67,6 +69,21 @@ export function LoginPage() {
         actorRole: user.role,
         riskTier: "low",
       });
+      if (user.role === "student") {
+        try {
+          const station = await api.labStation.get();
+          const def = getComlab(station.comlabId);
+          await api.attendance.checkIn({
+            studentEmail: user.email,
+            comlabId: def.id,
+            comlabLabel: def.label,
+            workstationLabel: station.workstationLabel,
+            professorName: def.professorName,
+          });
+        } catch {
+          /* Attendance sync is best-effort when Lambda/DB are unavailable. */
+        }
+      }
       navigate(user.role === "admin" ? "/dashboard" : "/student-dashboard");
     } finally {
       setSubmitting(false);

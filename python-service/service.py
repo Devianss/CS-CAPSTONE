@@ -7,8 +7,11 @@ Electron spawns this via child_process.spawn.
 Endpoints
 ─────────
   POST /scan-file     → ClamAV file scan
+  GET  /usb-list
   POST /scan-usb      → USB device enumeration + scan
   POST /analyze-url   → URL reputation check
+  POST /enforcement/chrome-policy-check → Recent Chrome visits vs blocklist (Windows, best-effort)
+  POST /enforcement/usb-mount-scan      → Shallow scan of removable drive roots (EICAR heuristic)
   POST /ai-task       → Lambda Function URL proxy
   GET  /health        → liveness check
 
@@ -32,6 +35,9 @@ from urllib.parse import urlparse
 
 import requests  # pyright: ignore[reportMissingImports]
 from flask import Flask, jsonify, request
+
+from enforcement.chrome_history import check_blocked_chrome_visits
+from enforcement.usb_mount_scan import scan_removable_mounts
 
 # Optional: install python-clamd for real ClamAV support
 try:
@@ -295,6 +301,29 @@ def analyze_url():
 
 
 # ─────────────────────────────────────────────
+#  /enforcement/* – host-level policy probes (.student runtime; Windows-oriented)
+# ─────────────────────────────────────────────
+@app.post("/enforcement/chrome-policy-check")
+def enforcement_chrome_policy_check():
+    """Recent Chrome visits vs blocked domain list (copy SQLite History, best-effort)."""
+    body = request.get_json(force=True, silent=True) or {}
+    raw_list = body.get("blockedDomains") or body.get("blocked_domains") or []
+    if not isinstance(raw_list, list):
+        return jsonify(ok=False, error="blockedDomains must be an array"), 400
+    domains = [str(d).strip() for d in raw_list if str(d).strip()]
+    result = check_blocked_chrome_visits(domains)
+    return jsonify(ok=result.get("ok", True), **{k: v for k, v in result.items() if k != "ok"})
+
+
+@app.post("/enforcement/usb-mount-scan")
+def enforcement_usb_mount_scan():
+    """Quick scan of removable drive roots (EICAR / shallow file read)."""
+    _ = request.get_json(force=True, silent=True) or {}
+    report = scan_removable_mounts()
+    return jsonify(ok=True, report=report)
+
+
+# ─────────────────────────────────────────────
 #  /ai-task  – Groq (legacy history format compatibility)
 # ─────────────────────────────────────────────
 @app.post("/ai-task")
@@ -307,6 +336,15 @@ def ai_task():
     tools = body.get("tools") or []
     history = body.get("history") or []
     temperature: float = body.get("temperature", 0.3)
+    use_knowledge_base = body.get("useKnowledgeBase", True)
+    if isinstance(use_knowledge_base, str):
+        use_knowledge_base = use_knowledge_base.lower() in ("1", "true", "yes")
+    kb_top_k = body.get("kbTopK", 5)
+    try:
+        kb_top_k = int(kb_top_k)
+    except Exception:
+        kb_top_k = 5
+    kb_top_k = max(1, min(kb_top_k, 12))
 
     if not prompt:
         return jsonify(ok=False, error="prompt required"), 400
@@ -319,6 +357,8 @@ def ai_task():
             response=AI_OFFLINE_FALLBACK,
             source="local_fallback",
             detail="AI Lambda URL is not configured in python-service/service.py.",
+            ragCitations=[],
+            ragUsed=False,
         )
 
     role = "admin" if role == "admin" else "student"
@@ -375,6 +415,8 @@ def ai_task():
             "history": history,
             "maxTokens": max_tokens,
             "temperature": temperature,
+            "useKnowledgeBase": use_knowledge_base,
+            "kbTopK": kb_top_k,
         }
         headers = {"Content-Type": "application/json"}
         res = requests.post(
@@ -402,6 +444,11 @@ def ai_task():
         if not isinstance(updated_history, list):
             updated_history = messages + [{"role": "assistant", "content": [{"text": text}]}]
 
+        rag_citations = body.get("ragCitations")
+        if not isinstance(rag_citations, list):
+            rag_citations = []
+        rag_used = bool(body.get("ragUsed"))
+
         log.info("ai-task completed (%d chars) via provider=lambda url=%s", len(text), AI_LAMBDA_URL)
         return jsonify(
             ok=True,
@@ -412,6 +459,8 @@ def ai_task():
             outputTokens=output_tokens,
             totalTokens=total_tokens,
             updatedHistory=updated_history,
+            ragCitations=rag_citations,
+            ragUsed=rag_used,
         )
     except Exception as e:
         log.error("Lambda AI error: %s", e)
@@ -420,6 +469,8 @@ def ai_task():
             response=AI_OFFLINE_FALLBACK,
             source="local_fallback",
             detail=f"lambda_error: {str(e)[:360]}",
+            ragCitations=[],
+            ragUsed=False,
         )
 
 

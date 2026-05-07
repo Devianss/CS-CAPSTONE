@@ -5,6 +5,7 @@
  * Falls back gracefully when running in a plain browser (dev/test).
  */
 import { useCallback } from "react";
+import type { ElectronAPI, ElectronAttendanceSessionRow, PythonResult } from "../../types/electron";
 
 const isElectron = (): boolean =>
   typeof window !== "undefined" && !!window.electronAPI;
@@ -65,6 +66,7 @@ const browserStubs: ElectronAPI = {
     }),
     createFolder: async () => ({ ok: false, error: "Not in Electron" }),
     writeTextFile: async () => ({ ok: false, error: "Not in Electron" }),
+    readTextFile: async () => ({ ok: false, error: "Not in Electron" }),
     listDir: async () => ({ ok: false, entries: [], error: "Not in Electron" }),
   },
   telemetry: {
@@ -80,6 +82,18 @@ const browserStubs: ElectronAPI = {
   audit: {
     log: async () => true,
     list: async () => [],
+  },
+  labStation: {
+    get: async () => ({ comlabId: "08", workstationLabel: "PC-01" }),
+    set: async (payload) => ({
+      comlabId: String(payload.comlabId || "08").trim(),
+      workstationLabel: String(payload.workstationLabel || "PC-01").trim().slice(0, 64),
+    }),
+  },
+  attendance: {
+    checkIn: async () => true,
+    checkOut: async () => true,
+    list: async (): Promise<ElectronAttendanceSessionRow[]> => [],
   },
   agent: {
     propose: async () => ({
@@ -184,12 +198,16 @@ export interface AITaskPayload {
   history?: AIMessage[];
   maxTokens?: number;
   temperature?: number;
+  /** When false, Lambda skips Supabase KB retrieval. Default true. */
+  useKnowledgeBase?: boolean;
+  /** Chunk count for KB retrieval (1–12). */
+  kbTopK?: number;
 }
 
 export interface AITaskResult {
   ok: boolean;
   response?: string;
-  source?: "groq" | "local_fallback";
+  source?: "groq" | "lambda" | "local_fallback";
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
@@ -197,6 +215,8 @@ export interface AITaskResult {
   updatedHistory?: AIMessage[];
   error?: string;
   detail?: string;
+  ragCitations?: Array<{ id?: number; source?: string; title?: string; score?: number }>;
+  ragUsed?: boolean;
 }
 
 export function useAI() {

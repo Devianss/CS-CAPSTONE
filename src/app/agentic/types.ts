@@ -31,10 +31,12 @@ export type ActionType =
   | "runa_create_folder"
   | "runa_write_file"
   | "runa_move_within_vault"
+  | "runa_read_file"
   // MEDIUM
   | "recommend_action"
   | "draft_policy"
   | "mark_notification"
+  | "runa_delete_within_vault"
   // HIGH
   | "student_hitl_escalation"
   | "wipe_terminal"
